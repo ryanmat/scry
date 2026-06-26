@@ -41,13 +41,9 @@ mlruns/
 .dvc/tmp/
 .dvc/cache/
 
-# Local tooling, stray directories, editor/OS cruft
-.claude/
+# Stray directories, editor/OS cruft
 None/
 .DS_Store
 *.swp
 .idea/
 .vscode/
-
-# Machine-local Claude project lessons (the rest of docs/ is public and tracked)
-docs/lessons.md
