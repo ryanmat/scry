@@ -4,8 +4,11 @@
 name: publish
 
 on:
-  release:
-    types: [published]
+  # To auto-publish on every GitHub Release, configure a PyPI Trusted Publisher
+  # (a pending publisher for this repo + workflow + the "pypi" environment), then
+  # add back:
+  #   release:
+  #     types: [published]
   workflow_dispatch:
 
 permissions:
