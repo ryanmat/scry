@@ -8,36 +8,8 @@ This directory contains LogicModule components for integrating Scry with LogicMo
 
 | File | Type | Status |
 |------|------|--------|
-| `Scry_Diagnostic.groovy` | DiagnosticSource | Ready to deploy |
 | `REMEDIATION_DESIGN.md` | Design Document | Future implementation |
 | `external_alert_handler.ps1` | External Alerting | Workaround available |
-
----
-
-## DiagnosticSource (Scry_Diagnostic.groovy)
-
-Calls the prediction API and returns cluster state diagnosis in markdown format.
-
-### Device Properties
-
-| Property | Required | Description |
-|----------|----------|-------------|
-| `scry.api.url` | No | API endpoint (defaults to your configured prediction API) |
-
-### Installation
-
-1. Create a new DiagnosticSource in LM portal
-2. Copy the Groovy script content
-3. Set AppliesTo filter for K8s resources
-4. Save and test on a device
-
-### Output
-
-Returns markdown-formatted diagnosis including:
-- Predicted cluster state
-- Confidence score
-- Recommended action
-- Action-specific guidance
 
 ---
 
