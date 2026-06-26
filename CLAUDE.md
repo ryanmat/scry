@@ -36,7 +36,8 @@ Bring your own metrics in this shape and train from scratch.
 
 - `uv` for environments and dependencies: `uv sync --all-extras`.
 - `ruff` for lint and format; `pytest` for tests (`asyncio_mode=auto`).
-- Python 3.10+.
+- Python 3.10+; CI (`.github/workflows/ci.yml`) runs `ruff check` and `pytest` across 3.10, 3.11, and 3.12.
+- Import package is `scry`; the published distribution is `scryml` (the bare name `scry` was taken on PyPI).
 
 ## Conventions
 
