@@ -41,7 +41,8 @@ mlruns/
 .dvc/tmp/
 .dvc/cache/
 
-# Stray directories and editor/OS cruft
+# Local tooling, stray directories, editor/OS cruft
+.claude/
 None/
 .DS_Store
 *.swp

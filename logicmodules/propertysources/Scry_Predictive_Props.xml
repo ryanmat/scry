@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Description: LogicMonitor PropertySource for storing prediction details as properties. -->
+<!-- Description: Enriches resources with human-readable prediction context. -->
+<feed  version="1.0" ha498="true">
+  <header>
+    <company>Scry</company>
+    <feedtype>PROPERTYSOURCES</feedtype>
+    <feedversion>1</feedversion>
+    <checksum></checksum>
+  </header>
+  <body>
+    <PROPERTYSOURCE>
+      <id></id>
+      <name>Scry_Predictive_Props</name>
+      <displayedas>Scry Prediction Details</displayedas>
+      <description>Stores detailed prediction information as resource properties for context and troubleshooting.</description>
+      <group>Scry</group>
+      <tags></tags>
+      <auditVersion></auditVersion>
+      <checksum></checksum>
+      <appliesTo>scry.enabled == "true"</appliesTo>
+      <techType>SCRIPT</techType>
+      <collectInterval>15</collectInterval>
+      <scripts>
+        <groovyScript><![CDATA[
+// Description: Collects prediction details from Scry Predictive API.
+// Description: Stores full prediction response as resource properties.
+
+import com.santaba.agent.groovyapi.http.*
+import groovy.json.JsonSlurper
+import java.text.SimpleDateFormat
+
+// Configuration
+def apiUrl = hostProps.get("scry.api.url") ?: "https://your-scry-api.example.com"
+def resourceId = hostProps.get("system.displayName")
+def timeout = 10000 // 10 seconds
+
+try {
+    // Build request URL
+    def encodedResourceId = URLEncoder.encode(resourceId, "UTF-8")
+
+    // Make HTTP request
+    def httpClient = HTTP.open(apiUrl, timeout)
+    def response = httpClient.get("/predict/lookup?resource_id=${encodedResourceId}")
+
+    if (response.getStatusCode() == 200) {
+        def json = new JsonSlurper().parseText(response.getBody())
+
+        // Extract values
+        def clusterName = json.cluster_name ?: "UNKNOWN"
+        def action = json.action ?: "NONE"
+        def confidence = json.confidence ?: 0.0
+        def priority = json.priority ?: "LOW"
+
+        // Format timestamp
+        def dateFormat = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'")
+        dateFormat.setTimeZone(TimeZone.getTimeZone("UTC"))
+        def lastUpdated = dateFormat.format(new Date())
+
+        // Output properties
+        println "prediction.cluster_name=${clusterName}"
+        println "prediction.action=${action}"
+        println "prediction.confidence=${confidence}"
+        println "prediction.priority=${priority}"
+        println "prediction.last_updated=${lastUpdated}"
+        println "prediction.api_version=1.0.0"
+        println "prediction.api_status=healthy"
+
+        // Also include cluster description for context
+        def clusterDescriptions = [
+            "NORMAL": "Healthy operation",
+            "PRE_SCALE": "Resource pressure building - scaling may be needed",
+            "PRE_FAILURE": "Failure indicators present - investigate soon",
+            "ACTIVE_DEGRADATION": "Performance actively degrading",
+            "ANOMALY": "Unusual pattern detected"
+        ]
+        def description = clusterDescriptions[clusterName] ?: "Unknown state"
+        println "prediction.state_description=${description}"
+
+    } else {
+        // API returned error
+        println "prediction.cluster_name=UNKNOWN"
+        println "prediction.action=NONE"
+        println "prediction.confidence=0"
+        println "prediction.priority=LOW"
+        println "prediction.api_status=error"
+        println "prediction.state_description=API returned error"
+    }
+
+} catch (Exception e) {
+    // Connection or parsing error
+    println "prediction.cluster_name=UNKNOWN"
+    println "prediction.action=NONE"
+    println "prediction.confidence=0"
+    println "prediction.priority=LOW"
+    println "prediction.api_status=unreachable"
+    println "prediction.state_description=API connection failed"
+}
+
+return 0
+]]></groovyScript>
+      </scripts>
+    </PROPERTYSOURCE>
+  </body>
+</feed>

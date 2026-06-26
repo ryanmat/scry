@@ -1,0 +1,352 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Description: LogicMonitor DataSource for collecting anomaly detection metrics from Scry API. -->
+<!-- Description: Polls the /anomaly endpoint and stores forecast-based anomaly detection results. -->
+<feed  version="1.0" ha498="true">
+  <header>
+    <company>Scry</company>
+    <feedtype>DATASOURCES</feedtype>
+    <feedversion>1</feedversion>
+    <checksum></checksum>
+  </header>
+  <body>
+    <DATASOURCE>
+      <id></id>
+      <name>Scry_Anomaly</name>
+      <displayedas>Scry Anomaly</displayedas>
+      <description>Monitors forecast-based anomaly detection from the Scry API. Alerts when actual metric values fall outside Chronos-2 prediction intervals, indicating anomalous infrastructure behavior.</description>
+      <group>Scry</group>
+      <tags></tags>
+      <auditVersion></auditVersion>
+      <checksum></checksum>
+      <appliesTo>scry.enabled == "true"</appliesTo>
+      <techType>SCRIPT</techType>
+      <collectMethod>script</collectMethod>
+      <hasMultiInstances>false</hasMultiInstances>
+      <useWildValueAsUniqueIdentifier>false</useWildValueAsUniqueIdentifier>
+      <collectInterval>5</collectInterval>
+      <dataPoints>
+        <dataPoint>
+          <id></id>
+          <name>IsAnomaly</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>1 if anomaly detected (actuals outside prediction interval), 0 otherwise</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>IsAnomaly</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>= 1 error</alertExpr>
+          <alertExprNote>Anomaly detected: actual metrics outside forecast prediction interval</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>IsAnomaly</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>AnomalyScore</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Max normalized violation magnitude across all metrics (0 = no violation)</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>AnomalyScore</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>&gt; 2.0 error &gt; 1.0 warn</alertExpr>
+          <alertExprNote>High anomaly score indicates significant deviation from forecast</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>AnomalyScore</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>ViolatedMetricCount</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Number of metrics that violated their forecast bounds</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>ViolatedMetricCount</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>&gt; 3 error &gt; 1 warn</alertExpr>
+          <alertExprNote>Multiple metrics violating forecast bounds simultaneously</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>ViolatedMetricCount</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>Severity</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Severity level (1=low, 2=medium, 3=high, 4=critical)</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>Severity</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>&gt;= 3 error &gt;= 2 warn</alertExpr>
+          <alertExprNote>High or critical anomaly severity detected</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>Severity</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>ApiStatus</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>1 if anomaly API healthy, 0 if error</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>ApiStatus</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>= 0 error</alertExpr>
+          <alertExprNote>Anomaly detection API unreachable</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>ApiStatus</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>ApiLatencyMs</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>API response time in milliseconds</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>ApiLatencyMs</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>&gt; 5000 error &gt; 1000 warn</alertExpr>
+          <alertExprNote>Anomaly API response time degradation</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>ApiLatencyMs</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+      </dataPoints>
+      <graphs>
+        <graph>
+          <id></id>
+          <name>Anomaly Score</name>
+          <title>Anomaly Score</title>
+          <verticallabel>Score</verticallabel>
+          <rigid>false</rigid>
+          <maxValue>NaN</maxValue>
+          <minValue>0</minValue>
+          <displayPrio>1</displayPrio>
+          <timescale>1day</timescale>
+          <base1024>false</base1024>
+          <graphDataPoints>
+            <graphDataPoint>
+              <name>AnomalyScore</name>
+              <datapointName>AnomalyScore</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+          </graphDataPoints>
+          <virtualDataPoints></virtualDataPoints>
+        </graph>
+        <graph>
+          <id></id>
+          <name>Violated Metrics</name>
+          <title>Violated Metric Count</title>
+          <verticallabel>Count</verticallabel>
+          <rigid>false</rigid>
+          <maxValue>NaN</maxValue>
+          <minValue>0</minValue>
+          <displayPrio>2</displayPrio>
+          <timescale>1day</timescale>
+          <base1024>false</base1024>
+          <graphDataPoints>
+            <graphDataPoint>
+              <name>ViolatedMetricCount</name>
+              <datapointName>ViolatedMetricCount</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+          </graphDataPoints>
+          <virtualDataPoints></virtualDataPoints>
+        </graph>
+        <graph>
+          <id></id>
+          <name>API Health</name>
+          <title>Anomaly API Health</title>
+          <verticallabel></verticallabel>
+          <rigid>false</rigid>
+          <maxValue>NaN</maxValue>
+          <minValue>NaN</minValue>
+          <displayPrio>3</displayPrio>
+          <timescale>1day</timescale>
+          <base1024>false</base1024>
+          <graphDataPoints>
+            <graphDataPoint>
+              <name>ApiStatus</name>
+              <datapointName>ApiStatus</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+            <graphDataPoint>
+              <name>ApiLatencyMs</name>
+              <datapointName>ApiLatencyMs</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+          </graphDataPoints>
+          <virtualDataPoints></virtualDataPoints>
+        </graph>
+      </graphs>
+      <overviewGraphs></overviewGraphs>
+      <scripts>
+        <groovyScript><![CDATA[
+// Description: Collects anomaly detection metrics from Scry API /anomaly endpoint.
+// Description: Stores forecast-based anomaly detection results as DataSource metrics.
+
+import com.santaba.agent.groovyapi.http.*
+import groovy.json.JsonSlurper
+
+// Configuration
+def apiUrl = hostProps.get("scry.api.url") ?: "https://your-scry-api.example.com"
+def timeout = 10000 // 10 seconds
+
+// Severity string to numeric mapping
+def severityMap = [
+    "low": 1,
+    "medium": 2,
+    "high": 3,
+    "critical": 4
+]
+
+try {
+    def startTime = System.currentTimeMillis()
+
+    // Make HTTP request to anomaly endpoint
+    def httpClient = HTTP.open(apiUrl, timeout)
+    def response = httpClient.get("/anomaly")
+    def responseTime = System.currentTimeMillis() - startTime
+
+    if (response.getStatusCode() == 200) {
+        def json = new JsonSlurper().parseText(response.getBody())
+
+        def isAnomaly = json.is_anomaly ? 1 : 0
+        def anomalyScore = json.anomaly_score ?: 0.0
+        def violatedMetrics = json.violated_metrics ?: []
+        def severity = severityMap[json.severity] ?: 1
+
+        // Output metrics
+        println "IsAnomaly=${isAnomaly}"
+        println "AnomalyScore=${anomalyScore}"
+        println "ViolatedMetricCount=${violatedMetrics.size()}"
+        println "Severity=${severity}"
+        println "ApiStatus=1"
+        println "ApiLatencyMs=${responseTime}"
+
+    } else {
+        // API returned error
+        println "IsAnomaly=0"
+        println "AnomalyScore=0"
+        println "ViolatedMetricCount=0"
+        println "Severity=1"
+        println "ApiStatus=0"
+        println "ApiLatencyMs=${responseTime}"
+    }
+
+} catch (Exception e) {
+    // Connection or parsing error
+    println "IsAnomaly=0"
+    println "AnomalyScore=0"
+    println "ViolatedMetricCount=0"
+    println "Severity=1"
+    println "ApiStatus=0"
+    println "ApiLatencyMs=0"
+}
+
+return 0
+]]></groovyScript>
+      </scripts>
+    </DATASOURCE>
+  </body>
+</feed>

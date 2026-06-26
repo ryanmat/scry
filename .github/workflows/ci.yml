@@ -1,0 +1,24 @@
+# Description: Continuous integration: lint and test across supported Python versions.
+# Description: Runs ruff and pytest on push and pull request.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install ${{ matrix.python-version }}
+      - run: uv sync --all-extras
+      - run: uv run ruff check
+      - run: uv run pytest -q

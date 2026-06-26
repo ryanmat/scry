@@ -1,0 +1,418 @@
+{
+  "name": "Scry Predictive",
+  "description": "ML-based predictions for monitored resources showing prediction state distribution, confidence trends, and resources requiring attention.",
+  "groupFullPath": "Scry",
+  "sharable": true,
+  "widgetTokens": [],
+  "widgetsConfig": {
+    "widgetsConfigVersion": 2,
+    "widgets": [
+      {
+        "position": {
+          "col": 1,
+          "row": 1,
+          "sizex": 3,
+          "sizey": 2
+        },
+        "config": {
+          "bigNumberInfo": {
+            "dataPoints": [
+              {
+                "dataSourceFullName": "Scry_Predictive",
+                "dataPointName": "NeedsAction",
+                "aggregateFunction": "SUM",
+                "instanceName": "*",
+                "deviceGroupFullPath": "*",
+                "deviceDisplayName": "*"
+              }
+            ],
+            "counters": [],
+            "virtualDataPoints": [],
+            "colorThresholds": [
+              {
+                "level": 1,
+                "op": ">=",
+                "value": 1,
+                "colorMode": "threshold"
+              },
+              {
+                "level": 2,
+                "op": ">=",
+                "value": 5,
+                "colorMode": "threshold"
+              }
+            ],
+            "rightLabel": "Resources Needing Attention",
+            "bottomLabel": "Scry Predictions"
+          },
+          "displaySettings": {
+            "showAlertStatusBar": true
+          },
+          "type": "bigNumber",
+          "timescale": "1hour",
+          "version": 2,
+          "name": "Resources Needing Attention",
+          "description": "Count of resources predicted to need attention"
+        }
+      },
+      {
+        "position": {
+          "col": 4,
+          "row": 1,
+          "sizex": 3,
+          "sizey": 2
+        },
+        "config": {
+          "bigNumberInfo": {
+            "dataPoints": [
+              {
+                "dataSourceFullName": "Scry_Predictive",
+                "dataPointName": "ApiStatus",
+                "aggregateFunction": "MIN",
+                "instanceName": "*",
+                "deviceGroupFullPath": "*",
+                "deviceDisplayName": "*"
+              }
+            ],
+            "counters": [],
+            "virtualDataPoints": [],
+            "colorThresholds": [
+              {
+                "level": 2,
+                "op": "=",
+                "value": 0,
+                "colorMode": "threshold"
+              }
+            ],
+            "rightLabel": "API Health",
+            "bottomLabel": "1 = Healthy, 0 = Error"
+          },
+          "displaySettings": {
+            "showAlertStatusBar": true
+          },
+          "type": "bigNumber",
+          "timescale": "1hour",
+          "version": 2,
+          "name": "Prediction API Status",
+          "description": "Shows 0 if any resource cannot reach the prediction API"
+        }
+      },
+      {
+        "position": {
+          "col": 7,
+          "row": 1,
+          "sizex": 3,
+          "sizey": 2
+        },
+        "config": {
+          "bigNumberInfo": {
+            "dataPoints": [
+              {
+                "dataSourceFullName": "Scry_Predictive",
+                "dataPointName": "Confidence",
+                "aggregateFunction": "AVG",
+                "instanceName": "*",
+                "deviceGroupFullPath": "*",
+                "deviceDisplayName": "*"
+              }
+            ],
+            "counters": [],
+            "virtualDataPoints": [],
+            "colorThresholds": [
+              {
+                "level": 1,
+                "op": "<",
+                "value": 70,
+                "colorMode": "threshold"
+              },
+              {
+                "level": 2,
+                "op": "<",
+                "value": 50,
+                "colorMode": "threshold"
+              }
+            ],
+            "rightLabel": "Average Confidence",
+            "bottomLabel": "Percent"
+          },
+          "displaySettings": {
+            "showAlertStatusBar": true
+          },
+          "type": "bigNumber",
+          "timescale": "1hour",
+          "version": 2,
+          "name": "Average Prediction Confidence",
+          "description": "Average prediction confidence across all resources"
+        }
+      },
+      {
+        "position": {
+          "col": 10,
+          "row": 1,
+          "sizex": 3,
+          "sizey": 2
+        },
+        "config": {
+          "bigNumberInfo": {
+            "dataPoints": [
+              {
+                "dataSourceFullName": "Scry_Predictive",
+                "dataPointName": "ApiLatencyMs",
+                "aggregateFunction": "AVG",
+                "instanceName": "*",
+                "deviceGroupFullPath": "*",
+                "deviceDisplayName": "*"
+              }
+            ],
+            "counters": [],
+            "virtualDataPoints": [],
+            "colorThresholds": [
+              {
+                "level": 1,
+                "op": ">",
+                "value": 500,
+                "colorMode": "threshold"
+              },
+              {
+                "level": 2,
+                "op": ">",
+                "value": 2000,
+                "colorMode": "threshold"
+              }
+            ],
+            "rightLabel": "API Latency",
+            "bottomLabel": "Milliseconds"
+          },
+          "displaySettings": {
+            "showAlertStatusBar": true
+          },
+          "type": "bigNumber",
+          "timescale": "1hour",
+          "version": 2,
+          "name": "API Response Time",
+          "description": "Average prediction API response time"
+        }
+      },
+      {
+        "position": {
+          "col": 1,
+          "row": 3,
+          "sizex": 6,
+          "sizey": 4
+        },
+        "config": {
+          "pieChartInfo": {
+            "dataPoints": [
+              {
+                "dataSourceFullName": "Scry_Predictive",
+                "dataPointName": "ClusterId",
+                "aggregateFunction": "COUNT",
+                "instanceName": "*",
+                "deviceGroupFullPath": "*",
+                "deviceDisplayName": "*"
+              }
+            ],
+            "counters": [],
+            "virtualDataPoints": [],
+            "groupByOption": "dataPointValue",
+            "valueLabels": {
+              "0": "NORMAL",
+              "1": "PRE_SCALE",
+              "2": "PRE_FAILURE",
+              "3": "ACTIVE_DEGRADATION",
+              "4": "ANOMALY"
+            },
+            "colorMappings": {
+              "0": "#00C853",
+              "1": "#FFEB3B",
+              "2": "#FF9800",
+              "3": "#F44336",
+              "4": "#9C27B0"
+            }
+          },
+          "displaySettings": {
+            "showLabelsAndLinesOnChart": true,
+            "legendPosition": "right"
+          },
+          "type": "pieChart",
+          "timescale": "1hour",
+          "version": 2,
+          "name": "Prediction State Distribution",
+          "description": "Distribution of prediction states across all monitored resources"
+        }
+      },
+      {
+        "position": {
+          "col": 7,
+          "row": 3,
+          "sizex": 6,
+          "sizey": 4
+        },
+        "config": {
+          "graphInfo": {
+            "dataPoints": [
+              {
+                "dataSourceFullName": "Scry_Predictive",
+                "dataPointName": "Confidence",
+                "aggregateFunction": "AVG",
+                "instanceName": "*",
+                "deviceGroupFullPath": "*",
+                "deviceDisplayName": "*"
+              }
+            ],
+            "counters": [],
+            "virtualDataPoints": [],
+            "groupBy": "device"
+          },
+          "displaySettings": {
+            "showAlertStatusBar": true,
+            "showGlobalAlertStatusBar": false,
+            "plotType": "line",
+            "legend": true
+          },
+          "type": "cgraph",
+          "timescale": "1day",
+          "version": 2,
+          "name": "Confidence Trends",
+          "description": "Prediction confidence over time by resource"
+        }
+      },
+      {
+        "position": {
+          "col": 1,
+          "row": 7,
+          "sizex": 12,
+          "sizey": 4
+        },
+        "config": {
+          "columns": [
+            {
+              "columnName": "Resource",
+              "columnKey": "deviceDisplayName",
+              "dataPointName": "",
+              "columnDisplaySettings": {
+                "type": "link"
+              }
+            },
+            {
+              "columnName": "Cluster State",
+              "columnKey": "ClusterId",
+              "dataPointName": "ClusterId",
+              "columnDisplaySettings": {
+                "type": "valuemap",
+                "valueMap": {
+                  "0": "NORMAL",
+                  "1": "PRE_SCALE",
+                  "2": "PRE_FAILURE",
+                  "3": "ACTIVE_DEGRADATION",
+                  "4": "ANOMALY"
+                }
+              }
+            },
+            {
+              "columnName": "Confidence %",
+              "columnKey": "Confidence",
+              "dataPointName": "Confidence",
+              "columnDisplaySettings": {
+                "type": "number",
+                "decimalPlaces": 1
+              }
+            },
+            {
+              "columnName": "Priority",
+              "columnKey": "Priority",
+              "dataPointName": "Priority",
+              "columnDisplaySettings": {
+                "type": "valuemap",
+                "valueMap": {
+                  "1": "LOW",
+                  "2": "MEDIUM",
+                  "3": "HIGH"
+                }
+              }
+            },
+            {
+              "columnName": "Needs Action",
+              "columnKey": "NeedsAction",
+              "dataPointName": "NeedsAction",
+              "columnDisplaySettings": {
+                "type": "valuemap",
+                "valueMap": {
+                  "0": "No",
+                  "1": "Yes"
+                }
+              }
+            },
+            {
+              "columnName": "API Latency (ms)",
+              "columnKey": "ApiLatencyMs",
+              "dataPointName": "ApiLatencyMs",
+              "columnDisplaySettings": {
+                "type": "number",
+                "decimalPlaces": 0
+              }
+            }
+          ],
+          "dataSourceFullName": "Scry_Predictive",
+          "instanceName": "*",
+          "deviceGroupFullPath": "*",
+          "sortBy": "Priority",
+          "sortOrder": "desc",
+          "filters": [
+            {
+              "filterBy": "Priority",
+              "filterOp": ">=",
+              "filterValue": "2"
+            }
+          ],
+          "rowsPerPage": 25,
+          "displaySettings": {
+            "showAlertStatusBar": true,
+            "showPagination": true
+          },
+          "type": "table",
+          "timescale": "1hour",
+          "version": 2,
+          "name": "High Priority Predictions",
+          "description": "Resources with MEDIUM or HIGH priority predictions sorted by priority"
+        }
+      },
+      {
+        "position": {
+          "col": 1,
+          "row": 11,
+          "sizex": 12,
+          "sizey": 4
+        },
+        "config": {
+          "graphInfo": {
+            "dataPoints": [
+              {
+                "dataSourceFullName": "Scry_Predictive",
+                "dataPointName": "ClusterId",
+                "aggregateFunction": "AVG",
+                "instanceName": "*",
+                "deviceGroupFullPath": "*",
+                "deviceDisplayName": "*"
+              }
+            ],
+            "counters": [],
+            "virtualDataPoints": [],
+            "groupBy": "device"
+          },
+          "displaySettings": {
+            "showAlertStatusBar": true,
+            "showGlobalAlertStatusBar": false,
+            "plotType": "line",
+            "legend": true
+          },
+          "type": "cgraph",
+          "timescale": "1day",
+          "version": 2,
+          "name": "Prediction State History",
+          "description": "Cluster state history over time by resource (0=NORMAL through 4=ANOMALY)"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,76 @@
+# Description: Default model and training configuration for Scry.
+# Description: Sensitive values (passwords, keys) should be set via environment variables.
+
+# Model Architecture
+model:
+  num_clusters: 5
+  sequence_length: 30
+  numerical_hidden_dim: 64
+  categorical_hidden_dim: 32
+  latent_dim: 8
+
+# Training
+training:
+  batch_size: 64
+  pretrain_epochs: 500
+  cluster_epochs: 300
+  learning_rate: 0.001
+  beta: 1.0
+  lambda_cluster_start: 0.1
+  lambda_cluster_end: 1.0
+
+# Paths
+paths:
+  model_path: models/scry_model.pt
+  data_path: data/training_data.npz
+
+# Feature Configuration
+features:
+  numerical:
+    - cpuUsagePercent
+    - cpuUsageNanoCores
+    - memoryUsagePercent
+    - memoryUsageBytes
+    - memoryWorkingSetBytes
+    - memoryRssBytes
+    - networkRxBytes
+    - networkTxBytes
+    - kubePodContainerStatusRestartsTotal
+
+  categorical:
+    - podUp
+    - podConditionPhase
+    - kubePodStatusReady
+    - kubePodContainerStatusRunning
+    - kubePodContainerStatusWaiting
+    - kubePodContainerStatusTerminated
+    - healthRunning
+    - healthWaiting
+
+# Cluster Definitions
+# Each cluster is an operational state the model assigns to a resource.
+clusters:
+  - name: NORMAL
+    action: NONE
+    priority: LOW
+    description: System operating normally
+
+  - name: PRE_SCALE
+    action: SCALE
+    priority: MEDIUM
+    description: Consider proactive scaling
+
+  - name: PRE_FAILURE
+    action: DIAGNOSTIC
+    priority: HIGH
+    description: Collect diagnostics, prepare remediation
+
+  - name: ACTIVE_DEGRADATION
+    action: REMEDIATE
+    priority: CRITICAL
+    description: Immediate action required
+
+  - name: ANOMALY
+    action: ALERT
+    priority: HIGH
+    description: Unknown pattern, investigate

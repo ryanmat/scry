@@ -1,0 +1,415 @@
+# Description: Feature configuration for infrastructure domains.
+# Description: Single source of truth for metric names across HttpIngest and Scry.
+
+# Default profile to use when domain is not specified
+default_profile: kubernetes
+
+# Domain profiles define the features for each infrastructure type.
+# All metric names are actual LogicMonitor metric names from production data.
+profiles:
+  # LogicMonitor Collector Self-Monitoring
+  # Datasources: LogicMonitor_Collector_*
+  # LogicMonitor metric names.
+  collector:
+    description: "LogicMonitor Collector self-monitoring metrics"
+    numerical_features:
+      # Execution performance (DataCollectingTasks, ConfigCollectingTask, ReporterTask)
+      - ExecuteTime
+      - AvgExecTime
+      - MaxExecTime
+      - MinExecTime
+      - CollectTime
+      - DispatchTime
+      - ProcessExecuteTime
+      - SuccessExecuteTime
+      - SuccessRate
+      - PostProcessTime
+      - PrepareTime
+      - SendtoReporterTime
+      # CPU and JVM resources (ThreadCPUUsage, JVMMemoryPools, JVMGarbageCollection)
+      - CpuUsage
+      - ProcessorCount
+      - Used
+      - Committed
+      - MaximumMemory
+      - CollectionTime
+      # Thread health (ThreadUsage, ThreadCPUUsage)
+      - ThreadCount
+      - ThreadCnt
+      - RunningThreads
+      - RunnableThreadCnt
+      # Queue metrics (Throttler, BufferDataReporter, LMLogs)
+      - QueueSize
+      - BigQueueSize
+      - TasksCountInQueue
+      - SizeOfBigQueue
+      - ItemsInMemoryQueue
+      # Failure indicators (DataCollectingTasks, ReporterTask, Heartbeat)
+      - FailRate
+      - FailureRate
+      - Fail
+      - FailExecuteTime
+      - ExecuteFailed
+      - EnqueudFailed
+      - NanTaskRate
+      - HangCount
+      # Reporter and data pipeline (BufferDataReporter, ReporterTask)
+      - ReportTaskCount
+      - UnReported
+      - EntryFailureCount
+      - EntryFailureRate
+      - EntrySuccessCount
+      - EntrySuccessRate
+      - ComposeFailedCount
+      # System health (DataCollectingTasks, ConfigCollectingTask)
+      - RunningCount
+      - ProcessCount
+      - InstanceCount
+      - ExecutingTasks
+    categorical_features:
+      - Active
+      - santabaConnection
+      - persistentQueueStatus
+
+  # KubeVirt Virtual Machines (OpenShift Virtualization)
+  # Datasources: kubevirt_*, OpenShift virtualized VMs via OTel
+  kubevirt:
+    description: "KubeVirt virtual machines on OpenShift/ROSA clusters"
+    numerical_features:
+      # VM CPU metrics
+      - kubevirt_vmi_cpu_seconds
+      - kubevirt_vmi_cpu_usage_seconds_total
+      - kubevirt_vmi_cpu_system_seconds_total
+      - kubevirt_vmi_cpu_user_seconds_total
+      - kubevirt_vmi_vcpu_seconds
+      - kubevirt_vmi_vcpu_wait_seconds
+      # VM Memory metrics
+      - kubevirt_vmi_memory_available_bytes
+      - kubevirt_vmi_memory_usable_bytes
+      - kubevirt_vmi_memory_used_bytes
+      - kubevirt_vmi_memory_resident_bytes
+      - kubevirt_vmi_memory_cached_bytes
+      - kubevirt_vmi_memory_swap_in_bytes
+      - kubevirt_vmi_memory_swap_out_bytes
+      - kubevirt_vmi_memory_actual_balloon_bytes
+      - kubevirt_vmi_memory_domain_bytes
+      # VM Network metrics
+      - kubevirt_vmi_network_receive_bytes_total
+      - kubevirt_vmi_network_transmit_bytes_total
+      - kubevirt_vmi_network_receive_packets_total
+      - kubevirt_vmi_network_transmit_packets_total
+      - kubevirt_vmi_network_receive_errors_total
+      - kubevirt_vmi_network_transmit_errors_total
+      - kubevirt_vmi_network_receive_packets_dropped_total
+      - kubevirt_vmi_network_transmit_packets_dropped_total
+      # VM Storage metrics
+      - kubevirt_vmi_storage_read_traffic_bytes_total
+      - kubevirt_vmi_storage_write_traffic_bytes_total
+      - kubevirt_vmi_storage_iops_read_total
+      - kubevirt_vmi_storage_iops_write_total
+      - kubevirt_vmi_storage_times_read_seconds_total
+      - kubevirt_vmi_storage_times_write_seconds_total
+      - kubevirt_vmi_storage_flush_requests_total
+      # VM status metrics
+      - kubevirt_vmi_phase_count
+      - kubevirt_vmi_info
+      - kubevirt_vm_resource_requests_cpu_cores
+      - kubevirt_vm_resource_requests_memory_bytes
+    categorical_features:
+      - kubevirt_vmi_phase
+      - kubevirt_vmi_running
+      - kubevirt_vmi_ready
+      - kubevirt_vmi_paused
+      - status
+
+  # Kubernetes/Container Workloads
+  # Datasources: Kubernetes_KSM_*, Kubernetes_PingK8s, Kubernetes_Service, Argus_*
+  # LogicMonitor metric names.
+  kubernetes:
+    description: "Container orchestration workloads (K8s, ECS, Docker Swarm)"
+    numerical_features:
+      # CPU metrics (KSM_Pods)
+      - cpuUsageNanoCores
+      - cpuUsageCoreNanoSeconds
+      - cpuLimits
+      - cpuRequests
+      # Memory metrics (KSM_Pods)
+      - memoryUsageBytes
+      - memoryWorkingSetBytes
+      - memoryRssBytes
+      - memoryLimits
+      - memoryRequests
+      - memoryAvailableBytes
+      - memoryMajorPageFaults
+      - memoryPageFaults
+      # Network metrics (KSM_Pods)
+      - networkRxBytes
+      - networkTxBytes
+      - networkRxErrors
+      - networkTxErrors
+      # Storage metrics (KSM_Pods)
+      - fsUsedBytes
+      - fsAvailableBytes
+      - fsCapacityBytes
+      - volumeUsedBytes
+      - volumeAvailableBytes
+      - volumeCapacityBytes
+      - volumeInodes
+      - volumeInodesFree
+      # Pod/Container status (KSM_Pods)
+      - kubePodContainerStatusRestartsTotal
+      - kubePodStartTime
+      # Deployment metrics (KSM_Deployments)
+      - kubeDeploymentStatusReplicas
+      - kubeDeploymentStatusReplicasAvailable
+      - kubeDeploymentStatusReplicasReady
+      - kubeDeploymentStatusReplicasUnavailable
+      - kubeDeploymentStatusReplicasUpdated
+      - kubeDeploymentSpecReplicas
+      # Node metrics (KSM_Pods)
+      - kubeNodeStatusAllocatableCpu
+      - kubeNodeStatusAllocatableMemory
+      - kubeNodeStatusCapacityCpu
+      - kubeNodeStatusCapacityMemory
+      # Node health signals (KSM_Pods)
+      - kubeNodeStatusConditionDiskPressure
+      - kubeNodeStatusConditionMemoryPressure
+      - kubeNodeStatusConditionPIDPressure
+      # StatefulSet metrics (KSM_Pods)
+      - kubeStatefulsetStatusReplicas
+      - kubeStatefulsetStatusReplicasReady
+      # DaemonSet metrics (KSM_Pods)
+      - kubeDaemonsetStatusNumberReady
+      - kubeDaemonsetStatusNumberUnavailable
+      # Ping/Network (PingK8s)
+      - average
+      - maxrtt
+      - minrtt
+    categorical_features:
+      - podConditionPhase
+      - kubePodStatusReady
+      - kubePodStatusScheduled
+      - kubePodContainerStatusRunning
+      - kubePodContainerStatusWaiting
+      - kubePodContainerStatusTerminated
+      - kubePodContainerStatusReady
+      - kubeNodeStatusConditionReady
+      - kubeDeploymentStatusAvailableTrue
+      - status
+
+  # Cloud Compute (Windows/Linux VMs)
+  # Datasources: Win*, Microsoft_Windows_*, Linux_OpenMetrics_*
+  cloud_compute:
+    description: "Cloud virtual machines and compute instances"
+    numerical_features:
+      # CPU metrics
+      - PercentProcessorTime
+      - PercentIdleTime
+      - ProcessorQueueLength
+      - cpuBusySeconds
+      - cpuIdleSeconds
+      - cpuUserSeconds
+      - cpuSystemSeconds
+      - cpuIowaitSeconds
+      - load_1
+      - load_5
+      - load_15
+      # Memory metrics
+      - FreePhysicalMemory
+      - FreeVirtualMemory
+      - TotalVisibleMemorySize
+      - TotalVirtualMemorySize
+      - MemTotal
+      - MemFree
+      - MemAvailable
+      - Cached
+      - Buffers
+      - SwapFree
+      - SwapTotal
+      - CacheBytes
+      - PoolNonpagedBytes
+      - PoolPagedBytes
+      # Disk metrics
+      - DiskReadBytesPerSec
+      - DiskWriteBytesPerSec
+      - DiskReadsPerSec
+      - DiskWritesPerSec
+      - AvgDiskSecPerRead
+      - AvgDiskSecPerWrite
+      - PercentDiskReadTime
+      - PercentDiskWriteTime
+      - CurrentDiskQueueLength
+      - FreeSpace
+      - Capacity
+      # Network metrics
+      - BytesReceivedPerSec
+      - BytesSentPerSec
+      - PacketsReceivedUnicastPerSec
+      - PacketsSentUnicastPerSec
+      - ConnectionsEstablished
+      - ConnectionsActive
+      # System metrics
+      - SystemUpTime
+      - NumberOfProcesses
+    categorical_features:
+      - Active
+      - isAlive
+
+  # Network Devices (SNMP + Streaming Telemetry)
+  # Datasources: SNMP*, WinIf-*, Cisco_*, Cisco_Streaming_Telemetry_*
+  network:
+    description: "Network devices, switches, routers, firewalls"
+    numerical_features:
+      # Interface traffic (SNMP standard names)
+      - BytesReceivedPerSec
+      - BytesSentPerSec
+      - PacketsReceivedUnicastPerSec
+      - PacketsSentUnicastPerSec
+      - PacketsReceivedNonUnicastPerSec
+      - PacketsSentNonUnicastPerSec
+      # Interface errors
+      - PacketsReceivedDiscarded
+      - PacketsOutboundDiscarded
+      # TCP/UDP metrics
+      - SegmentsReceivedPerSec
+      - SegmentsSentPerSec
+      - SegmentsRetransmittedPerSec
+      - DatagramsReceivedPerSec
+      - DatagramsSentPerSec
+      - DatagramsReceivedErrors
+      - ConnectionsEstablished
+      - ConnectionsActive
+      - ConnectionsPassive
+      - ConnectionsReset
+      - ConnectionFailures
+      # Cisco Streaming Telemetry (NETCONF/InfluxDB format)
+      - CPUUtil5Sec
+      - CPUUtil1Min
+      - CPUUtil5Min
+      - MemoryUsed
+      - MemoryFree
+      - MemoryTotal
+      - MemoryUtilization
+      - InOctets
+      - OutOctets
+      - InUcastPkts
+      - OutUcastPkts
+      - InMulticastPkts
+      - OutMulticastPkts
+      - InBroadcastPkts
+      - OutBroadcastPkts
+      - InErrors
+      - OutErrors
+      - InDiscards
+      - OutDiscards
+      - AdminStatus
+      - OperStatus
+      - Speed
+      - MTU
+    categorical_features:
+      - Active
+      - isAlive
+
+  # Database (SQL/NoSQL)
+  # Placeholder - add actual LM database datasource metrics when available
+  database:
+    description: "Database servers and managed database services"
+    numerical_features:
+      # Connection metrics
+      - ConnectionsEstablished
+      - ConnectionsActive
+      # Query metrics (from collector script cache as proxy)
+      - QueryTime
+      - AvgExecTime
+      - MaxExecTime
+      # Cache metrics
+      - CacheBytes
+      - cachedEntries
+      - expiredEntries
+    categorical_features:
+      - Active
+      - isAlive
+
+  # Application/Service Monitoring (.NET, IIS, Java)
+  # Datasources: .NetCLR*, Application Pools-, Microsoft_IIS_*
+  application:
+    description: "Application performance monitoring metrics"
+    numerical_features:
+      # Memory metrics
+      - NumBytesinallHeaps
+      - BytesinLoaderHeap
+      # GC metrics
+      - PercentTimeinGC
+      - NumberGen0Collections
+      - NumberGen1Collections
+      - NumberGen2Collections
+      # Thread metrics
+      - NumberofcurrentlogicalThreads
+      - NumberofcurrentphysicalThreads
+      - Numberofcurrentrecognizedthreads
+      - Numberoftotalrecognizedthreads
+      - TotalNumberofContentions
+      # Exception metrics
+      - NumExcepsThrownSec
+      # IIS metrics
+      - CurrentConnections
+      - BytesReceivedPerSec
+      - BytesSentPerSec
+      - TotalGetRequests
+      - TotalMethodRequests
+      - NotFoundErrorsPerSec
+      - ServiceUptime
+      # Worker process metrics
+      - CurrentWorkerProcesses
+      - WorkerProcessesCreated
+      - TotalWorkerProcessFailures
+      - CurrentApplicationPoolUptime
+    categorical_features:
+      - CurrentApplicationPoolState
+      - Active
+
+# Model hyperparameters per profile (optional overrides)
+model_config:
+  collector:
+    seq_len: 30
+    num_hidden: 128
+    cat_hidden: 32
+    latent_dim: 16
+  kubevirt:
+    seq_len: 30
+    num_hidden: 64
+    cat_hidden: 32
+    latent_dim: 8
+  kubernetes:
+    seq_len: 30
+    num_hidden: 128
+    cat_hidden: 32
+    latent_dim: 16
+  cloud_compute:
+    seq_len: 30
+    num_hidden: 64
+    cat_hidden: 32
+    latent_dim: 8
+  network:
+    seq_len: 30
+    num_hidden: 64
+    cat_hidden: 32
+    latent_dim: 8
+  database:
+    seq_len: 30
+    num_hidden: 64
+    cat_hidden: 32
+    latent_dim: 8
+  application:
+    seq_len: 30
+    num_hidden: 64
+    cat_hidden: 32
+    latent_dim: 8
+
+# Auto-discovery settings
+auto_discovery:
+  enabled: false
+  min_numerical_features: 3
+  min_categorical_features: 2
+  max_numerical_features: 20
+  max_categorical_features: 15

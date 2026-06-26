@@ -1,0 +1,953 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Description: LogicMonitor DataSource for collecting forecast accuracy from Scry API. -->
+<!-- Description: Polls the /accuracy endpoint and stores per-horizon and stability metrics. -->
+<feed  version="1.0" ha498="true">
+  <header>
+    <company>Scry</company>
+    <feedtype>DATASOURCES</feedtype>
+    <feedversion>1</feedversion>
+    <checksum></checksum>
+  </header>
+  <body>
+    <DATASOURCE>
+      <id></id>
+      <name>Scry_Accuracy</name>
+      <displayedas>Scry Accuracy</displayedas>
+      <description>Collects forecast accuracy (PICP, MAE, MASE, MPIW) and cluster stability metrics from the Scry Predictive API /accuracy endpoint.</description>
+      <group>Scry</group>
+      <tags></tags>
+      <auditVersion></auditVersion>
+      <checksum></checksum>
+      <appliesTo>scry.enabled == "true"</appliesTo>
+      <techType>SCRIPT</techType>
+      <collectMethod>script</collectMethod>
+      <hasMultiInstances>false</hasMultiInstances>
+      <useWildValueAsUniqueIdentifier>false</useWildValueAsUniqueIdentifier>
+      <collectInterval>15</collectInterval>
+      <dataPoints>
+        <dataPoint>
+          <id></id>
+          <name>Picp15m</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Prediction Interval Coverage Probability for 15-minute horizon (0-1)</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>Picp15m</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>&lt; 0.5 error &lt; 0.7 warn</alertExpr>
+          <alertExprNote>Low prediction interval coverage at 15m horizon</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>Picp15m</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>Picp1h</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Prediction Interval Coverage Probability for 1-hour horizon (0-1)</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>Picp1h</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>&lt; 0.5 error &lt; 0.7 warn</alertExpr>
+          <alertExprNote>Low prediction interval coverage at 1h horizon</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>Picp1h</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>Picp4h</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Prediction Interval Coverage Probability for 4-hour horizon (0-1)</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>Picp4h</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>&lt; 0.4 error &lt; 0.6 warn</alertExpr>
+          <alertExprNote>Low prediction interval coverage at 4h horizon</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>Picp4h</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>Picp24h</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Prediction Interval Coverage Probability for 24-hour horizon (0-1)</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>Picp24h</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>&lt; 0.3 error &lt; 0.5 warn</alertExpr>
+          <alertExprNote>Low prediction interval coverage at 24h horizon</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>Picp24h</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>Mae15m</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Mean Absolute Error for 15-minute horizon</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>Mae15m</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr></alertExpr>
+          <alertExprNote></alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>Mae15m</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>Mae1h</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Mean Absolute Error for 1-hour horizon</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>Mae1h</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr></alertExpr>
+          <alertExprNote></alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>Mae1h</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>Mae4h</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Mean Absolute Error for 4-hour horizon</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>Mae4h</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr></alertExpr>
+          <alertExprNote></alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>Mae4h</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>Mae24h</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Mean Absolute Error for 24-hour horizon</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>Mae24h</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr></alertExpr>
+          <alertExprNote></alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>Mae24h</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>Mase15m</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Mean Absolute Scaled Error for 15-minute horizon (above 1.0 = worse than naive)</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>Mase15m</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>&gt; 2.0 error &gt; 1.5 warn</alertExpr>
+          <alertExprNote>Model forecast worse than naive at 15m horizon</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>Mase15m</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>Mase1h</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Mean Absolute Scaled Error for 1-hour horizon (above 1.0 = worse than naive)</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>Mase1h</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>&gt; 2.0 error &gt; 1.5 warn</alertExpr>
+          <alertExprNote>Model forecast worse than naive at 1h horizon</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>Mase1h</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>Mase4h</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Mean Absolute Scaled Error for 4-hour horizon (above 1.0 = worse than naive)</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>Mase4h</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>&gt; 2.0 error &gt; 1.5 warn</alertExpr>
+          <alertExprNote>Model forecast worse than naive at 4h horizon</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>Mase4h</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>Mase24h</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Mean Absolute Scaled Error for 24-hour horizon (above 1.0 = worse than naive)</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>Mase24h</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>&gt; 2.0 error &gt; 1.5 warn</alertExpr>
+          <alertExprNote>Model forecast worse than naive at 24h horizon</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>Mase24h</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>Mpiw15m</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Mean Prediction Interval Width for 15-minute horizon</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>Mpiw15m</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr></alertExpr>
+          <alertExprNote></alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>Mpiw15m</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>Mpiw1h</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Mean Prediction Interval Width for 1-hour horizon</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>Mpiw1h</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr></alertExpr>
+          <alertExprNote></alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>Mpiw1h</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>Mpiw4h</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Mean Prediction Interval Width for 4-hour horizon</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>Mpiw4h</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr></alertExpr>
+          <alertExprNote></alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>Mpiw4h</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>Mpiw24h</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Mean Prediction Interval Width for 24-hour horizon</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>Mpiw24h</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr></alertExpr>
+          <alertExprNote></alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>Mpiw24h</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>TransitionRate</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Cluster transition rate - fraction of consecutive predictions that change cluster (0-1)</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>TransitionRate</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>&gt; 0.5 error &gt; 0.3 warn</alertExpr>
+          <alertExprNote>High cluster transition rate indicates unstable predictions</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>TransitionRate</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>ConfidenceStd</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Standard deviation of prediction confidence over recent window</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>ConfidenceStd</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>&gt; 0.3 error &gt; 0.2 warn</alertExpr>
+          <alertExprNote>High confidence volatility indicates unstable model</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>ConfidenceStd</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>DominantClusterPct</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Percentage of time spent in most common cluster (0-100)</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>DominantClusterPct</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>&lt; 30 warn</alertExpr>
+          <alertExprNote>No dominant cluster - predictions spread across many clusters</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>DominantClusterPct</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>ObservationCount</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Number of observations in the accuracy tracker rolling buffer</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>ObservationCount</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr></alertExpr>
+          <alertExprNote></alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>ObservationCount</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>ApiStatus</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>1 if API healthy, 0 if error</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>ApiStatus</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>= 0 error</alertExpr>
+          <alertExprNote>Accuracy API unreachable</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>ApiStatus</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>ApiLatencyMs</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>API response time in milliseconds</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>ApiLatencyMs</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>&gt; 5000 error &gt; 1000 warn</alertExpr>
+          <alertExprNote>Accuracy API response time degradation</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>ApiLatencyMs</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+      </dataPoints>
+      <graphs>
+        <graph>
+          <id></id>
+          <name>Coverage (PICP)</name>
+          <title>Prediction Interval Coverage by Horizon</title>
+          <verticallabel>PICP (0-1)</verticallabel>
+          <rigid>false</rigid>
+          <maxValue>1</maxValue>
+          <minValue>0</minValue>
+          <displayPrio>1</displayPrio>
+          <timescale>1day</timescale>
+          <base1024>false</base1024>
+          <graphDataPoints>
+            <graphDataPoint>
+              <name>Picp15m</name>
+              <datapointName>Picp15m</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+            <graphDataPoint>
+              <name>Picp1h</name>
+              <datapointName>Picp1h</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+            <graphDataPoint>
+              <name>Picp4h</name>
+              <datapointName>Picp4h</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+            <graphDataPoint>
+              <name>Picp24h</name>
+              <datapointName>Picp24h</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+          </graphDataPoints>
+          <virtualDataPoints></virtualDataPoints>
+        </graph>
+        <graph>
+          <id></id>
+          <name>Error (MAE)</name>
+          <title>Mean Absolute Error by Horizon</title>
+          <verticallabel>MAE</verticallabel>
+          <rigid>false</rigid>
+          <maxValue>NaN</maxValue>
+          <minValue>0</minValue>
+          <displayPrio>2</displayPrio>
+          <timescale>1day</timescale>
+          <base1024>false</base1024>
+          <graphDataPoints>
+            <graphDataPoint>
+              <name>Mae15m</name>
+              <datapointName>Mae15m</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+            <graphDataPoint>
+              <name>Mae1h</name>
+              <datapointName>Mae1h</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+            <graphDataPoint>
+              <name>Mae4h</name>
+              <datapointName>Mae4h</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+            <graphDataPoint>
+              <name>Mae24h</name>
+              <datapointName>Mae24h</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+          </graphDataPoints>
+          <virtualDataPoints></virtualDataPoints>
+        </graph>
+        <graph>
+          <id></id>
+          <name>Scaled Error (MASE)</name>
+          <title>Mean Absolute Scaled Error by Horizon</title>
+          <verticallabel>MASE</verticallabel>
+          <rigid>false</rigid>
+          <maxValue>NaN</maxValue>
+          <minValue>0</minValue>
+          <displayPrio>3</displayPrio>
+          <timescale>1day</timescale>
+          <base1024>false</base1024>
+          <graphDataPoints>
+            <graphDataPoint>
+              <name>Mase15m</name>
+              <datapointName>Mase15m</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+            <graphDataPoint>
+              <name>Mase1h</name>
+              <datapointName>Mase1h</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+            <graphDataPoint>
+              <name>Mase4h</name>
+              <datapointName>Mase4h</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+            <graphDataPoint>
+              <name>Mase24h</name>
+              <datapointName>Mase24h</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+          </graphDataPoints>
+          <virtualDataPoints></virtualDataPoints>
+        </graph>
+        <graph>
+          <id></id>
+          <name>Cluster Stability</name>
+          <title>Cluster Stability Metrics</title>
+          <verticallabel></verticallabel>
+          <rigid>false</rigid>
+          <maxValue>NaN</maxValue>
+          <minValue>0</minValue>
+          <displayPrio>4</displayPrio>
+          <timescale>1day</timescale>
+          <base1024>false</base1024>
+          <graphDataPoints>
+            <graphDataPoint>
+              <name>TransitionRate</name>
+              <datapointName>TransitionRate</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+            <graphDataPoint>
+              <name>ConfidenceStd</name>
+              <datapointName>ConfidenceStd</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+            <graphDataPoint>
+              <name>DominantClusterPct</name>
+              <datapointName>DominantClusterPct</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+          </graphDataPoints>
+          <virtualDataPoints></virtualDataPoints>
+        </graph>
+        <graph>
+          <id></id>
+          <name>API Health</name>
+          <title>Accuracy API Health</title>
+          <verticallabel></verticallabel>
+          <rigid>false</rigid>
+          <maxValue>NaN</maxValue>
+          <minValue>NaN</minValue>
+          <displayPrio>5</displayPrio>
+          <timescale>1day</timescale>
+          <base1024>false</base1024>
+          <graphDataPoints>
+            <graphDataPoint>
+              <name>ApiStatus</name>
+              <datapointName>ApiStatus</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+            <graphDataPoint>
+              <name>ApiLatencyMs</name>
+              <datapointName>ApiLatencyMs</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+          </graphDataPoints>
+          <virtualDataPoints></virtualDataPoints>
+        </graph>
+      </graphs>
+      <overviewGraphs></overviewGraphs>
+      <scripts>
+        <groovyScript><![CDATA[
+// Description: Collects forecast accuracy metrics from Scry API.
+// Description: Stores per-horizon and stability metrics on the resource.
+
+import com.santaba.agent.groovyapi.http.*
+import groovy.json.JsonSlurper
+
+// Configuration
+def apiUrl = hostProps.get("scry.api.url") ?: "https://your-scry-api.example.com"
+def timeout = 10000 // 10 seconds
+
+try {
+    def startTime = System.currentTimeMillis()
+
+    // Make HTTP request to accuracy endpoint
+    def httpClient = HTTP.open(apiUrl, timeout)
+    def response = httpClient.get("/accuracy")
+    def responseTime = System.currentTimeMillis() - startTime
+
+    if (response.getStatusCode() == 200) {
+        def json = new JsonSlurper().parseText(response.getBody())
+
+        // Per-horizon metrics
+        ["15m", "1h", "4h", "24h"].each { horizon ->
+            ["Picp", "Mae", "Mase", "Mpiw"].each { metric ->
+                def key = "${metric}${horizon}"
+                def value = json[key] ?: 0
+                println "${key}=${value}"
+            }
+        }
+
+        // Stability metrics
+        println "TransitionRate=${json.TransitionRate ?: 0}"
+        println "ConfidenceStd=${json.ConfidenceStd ?: 0}"
+        println "DominantClusterPct=${json.DominantClusterPct ?: 0}"
+
+        // Observation count
+        println "ObservationCount=${json.ObservationCount ?: 0}"
+
+        // Operational metrics
+        println "ApiLatencyMs=${responseTime}"
+        println "ApiStatus=1"
+
+    } else {
+        // API returned error - output zeros for all metrics
+        ["15m", "1h", "4h", "24h"].each { horizon ->
+            ["Picp", "Mae", "Mase", "Mpiw"].each { metric ->
+                println "${metric}${horizon}=0"
+            }
+        }
+        println "TransitionRate=0"
+        println "ConfidenceStd=0"
+        println "DominantClusterPct=0"
+        println "ObservationCount=0"
+        println "ApiLatencyMs=${responseTime}"
+        println "ApiStatus=0"
+    }
+
+} catch (Exception e) {
+    // Connection or parsing error - output zeros
+    ["15m", "1h", "4h", "24h"].each { horizon ->
+        ["Picp", "Mae", "Mase", "Mpiw"].each { metric ->
+            println "${metric}${horizon}=0"
+        }
+    }
+    println "TransitionRate=0"
+    println "ConfidenceStd=0"
+    println "DominantClusterPct=0"
+    println "ObservationCount=0"
+    println "ApiLatencyMs=0"
+    println "ApiStatus=0"
+}
+
+return 0
+]]></groovyScript>
+      </scripts>
+    </DATASOURCE>
+  </body>
+</feed>

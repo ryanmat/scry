@@ -1,0 +1,500 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Description: LogicMonitor DataSource for collecting drift detection metrics from Scry API. -->
+<!-- Description: Polls the /drift endpoint and stores PSI and ADWIN drift metrics. -->
+<feed  version="1.0" ha498="true">
+  <header>
+    <company>Scry</company>
+    <feedtype>DATASOURCES</feedtype>
+    <feedversion>1</feedversion>
+    <checksum></checksum>
+  </header>
+  <body>
+    <DATASOURCE>
+      <id></id>
+      <name>Scry_Drift</name>
+      <displayedas>Scry Drift</displayedas>
+      <description>Monitors feature drift (PSI) and prediction drift (ADWIN) from the Scry API. Alerts when input distributions shift significantly from training data or when prediction error patterns change.</description>
+      <group>Scry</group>
+      <tags></tags>
+      <auditVersion></auditVersion>
+      <checksum></checksum>
+      <appliesTo>scry.enabled == "true"</appliesTo>
+      <techType>SCRIPT</techType>
+      <collectMethod>script</collectMethod>
+      <hasMultiInstances>false</hasMultiInstances>
+      <useWildValueAsUniqueIdentifier>false</useWildValueAsUniqueIdentifier>
+      <collectInterval>15</collectInterval>
+      <dataPoints>
+        <dataPoint>
+          <id></id>
+          <name>HasFeatureDrift</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>1 if feature distribution drift detected (PSI above threshold), 0 otherwise</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>HasFeatureDrift</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>= 1 error</alertExpr>
+          <alertExprNote>Feature distribution has drifted from training data</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>HasFeatureDrift</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>MaxPsiValue</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Maximum PSI value across all features (0 = identical, higher = more drift)</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>MaxPsiValue</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>&gt; 0.2 error &gt; 0.1 warn</alertExpr>
+          <alertExprNote>PSI above 0.2 indicates significant distribution shift</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>MaxPsiValue</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>PsiThreshold</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Configured PSI threshold for drift detection</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>PsiThreshold</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr></alertExpr>
+          <alertExprNote></alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>PsiThreshold</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>HasPredictionDrift</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>1 if prediction error drift detected (ADWIN), 0 otherwise</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>HasPredictionDrift</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>= 1 error</alertExpr>
+          <alertExprNote>Prediction error pattern has changed, model may need retraining</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>HasPredictionDrift</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>DriftScore</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>ADWIN drift detection score (higher = stronger change signal)</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>DriftScore</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr></alertExpr>
+          <alertExprNote></alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>DriftScore</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>DriftThreshold</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Configured ADWIN threshold for prediction drift detection</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>DriftThreshold</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr></alertExpr>
+          <alertExprNote></alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>DriftThreshold</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>MeanErrorBefore</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Mean prediction error before detected change point</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>MeanErrorBefore</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr></alertExpr>
+          <alertExprNote></alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>MeanErrorBefore</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>MeanErrorAfter</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Mean prediction error after detected change point</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>MeanErrorAfter</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr></alertExpr>
+          <alertExprNote></alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>MeanErrorAfter</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>ApiStatus</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>1 if drift API healthy, 0 if error</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>ApiStatus</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>= 0 error</alertExpr>
+          <alertExprNote>Drift detection API unreachable</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>ApiStatus</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>ApiLatencyMs</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>API response time in milliseconds</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>ApiLatencyMs</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>&gt; 5000 error &gt; 1000 warn</alertExpr>
+          <alertExprNote>Drift API response time degradation</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>ApiLatencyMs</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+      </dataPoints>
+      <graphs>
+        <graph>
+          <id></id>
+          <name>Feature Drift (PSI)</name>
+          <title>Feature Drift (PSI)</title>
+          <verticallabel>PSI Value</verticallabel>
+          <rigid>false</rigid>
+          <maxValue>NaN</maxValue>
+          <minValue>0</minValue>
+          <displayPrio>1</displayPrio>
+          <timescale>1day</timescale>
+          <base1024>false</base1024>
+          <graphDataPoints>
+            <graphDataPoint>
+              <name>MaxPsiValue</name>
+              <datapointName>MaxPsiValue</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+            <graphDataPoint>
+              <name>PsiThreshold</name>
+              <datapointName>PsiThreshold</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+          </graphDataPoints>
+          <virtualDataPoints></virtualDataPoints>
+        </graph>
+        <graph>
+          <id></id>
+          <name>Prediction Drift (ADWIN)</name>
+          <title>Prediction Drift (ADWIN)</title>
+          <verticallabel>Score</verticallabel>
+          <rigid>false</rigid>
+          <maxValue>NaN</maxValue>
+          <minValue>0</minValue>
+          <displayPrio>2</displayPrio>
+          <timescale>1day</timescale>
+          <base1024>false</base1024>
+          <graphDataPoints>
+            <graphDataPoint>
+              <name>DriftScore</name>
+              <datapointName>DriftScore</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+            <graphDataPoint>
+              <name>DriftThreshold</name>
+              <datapointName>DriftThreshold</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+          </graphDataPoints>
+          <virtualDataPoints></virtualDataPoints>
+        </graph>
+        <graph>
+          <id></id>
+          <name>Prediction Error Means</name>
+          <title>Prediction Error Means</title>
+          <verticallabel>Error</verticallabel>
+          <rigid>false</rigid>
+          <maxValue>NaN</maxValue>
+          <minValue>NaN</minValue>
+          <displayPrio>3</displayPrio>
+          <timescale>1day</timescale>
+          <base1024>false</base1024>
+          <graphDataPoints>
+            <graphDataPoint>
+              <name>MeanErrorBefore</name>
+              <datapointName>MeanErrorBefore</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+            <graphDataPoint>
+              <name>MeanErrorAfter</name>
+              <datapointName>MeanErrorAfter</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+          </graphDataPoints>
+          <virtualDataPoints></virtualDataPoints>
+        </graph>
+      </graphs>
+      <overviewGraphs></overviewGraphs>
+      <scripts>
+        <groovyScript><![CDATA[
+// Description: Collects drift metrics from Scry API /drift endpoint.
+// Description: Stores PSI and ADWIN drift detection results as DataSource metrics.
+
+import com.santaba.agent.groovyapi.http.*
+import groovy.json.JsonSlurper
+
+// Configuration
+def apiUrl = hostProps.get("scry.api.url") ?: "https://your-scry-api.example.com"
+def timeout = 10000 // 10 seconds
+
+try {
+    def startTime = System.currentTimeMillis()
+
+    // Make HTTP request to drift endpoint
+    def httpClient = HTTP.open(apiUrl, timeout)
+    def response = httpClient.get("/drift")
+    def responseTime = System.currentTimeMillis() - startTime
+
+    if (response.getStatusCode() == 200) {
+        def json = new JsonSlurper().parseText(response.getBody())
+
+        def featureDrift = json.feature_drift ?: [:]
+        def predictionDrift = json.prediction_drift ?: [:]
+
+        // Feature drift metrics
+        def hasFeatureDrift = featureDrift.has_drift ? 1 : 0
+        def maxPsi = featureDrift.max_psi ?: 0.0
+        def psiThreshold = featureDrift.threshold ?: 0.2
+
+        // Prediction drift metrics
+        def hasPredictionDrift = predictionDrift.has_drift ? 1 : 0
+        def driftScore = predictionDrift.score ?: 0.0
+        def driftThreshold = predictionDrift.threshold ?: 0.0
+        def meanErrorBefore = predictionDrift.mean_before ?: 0.0
+        def meanErrorAfter = predictionDrift.mean_after ?: 0.0
+
+        // Output metrics
+        println "HasFeatureDrift=${hasFeatureDrift}"
+        println "MaxPsiValue=${maxPsi}"
+        println "PsiThreshold=${psiThreshold}"
+        println "HasPredictionDrift=${hasPredictionDrift}"
+        println "DriftScore=${driftScore}"
+        println "DriftThreshold=${driftThreshold}"
+        println "MeanErrorBefore=${meanErrorBefore}"
+        println "MeanErrorAfter=${meanErrorAfter}"
+        println "ApiStatus=1"
+        println "ApiLatencyMs=${responseTime}"
+
+    } else {
+        // API returned error
+        println "HasFeatureDrift=0"
+        println "MaxPsiValue=0"
+        println "PsiThreshold=0.2"
+        println "HasPredictionDrift=0"
+        println "DriftScore=0"
+        println "DriftThreshold=0"
+        println "MeanErrorBefore=0"
+        println "MeanErrorAfter=0"
+        println "ApiStatus=0"
+        println "ApiLatencyMs=${responseTime}"
+    }
+
+} catch (Exception e) {
+    // Connection or parsing error
+    println "HasFeatureDrift=0"
+    println "MaxPsiValue=0"
+    println "PsiThreshold=0.2"
+    println "HasPredictionDrift=0"
+    println "DriftScore=0"
+    println "DriftThreshold=0"
+    println "MeanErrorBefore=0"
+    println "MeanErrorAfter=0"
+    println "ApiStatus=0"
+    println "ApiLatencyMs=0"
+}
+
+return 0
+]]></groovyScript>
+      </scripts>
+    </DATASOURCE>
+  </body>
+</feed>

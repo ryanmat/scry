@@ -1,0 +1,352 @@
+{
+  "name": "Scry Model Health",
+  "description": "Monitors ML model operational health including feature drift, prediction drift, forecast anomalies, and API performance across all Scry-monitored resources.",
+  "groupFullPath": "Scry",
+  "sharable": true,
+  "widgetTokens": [],
+  "widgetsConfig": {
+    "widgetsConfigVersion": 2,
+    "widgets": [
+      {
+        "position": {
+          "col": 1,
+          "row": 1,
+          "sizex": 3,
+          "sizey": 2
+        },
+        "config": {
+          "bigNumberInfo": {
+            "dataPoints": [
+              {
+                "dataSourceFullName": "Scry_Drift",
+                "dataPointName": "HasFeatureDrift",
+                "aggregateFunction": "MAX",
+                "instanceName": "*",
+                "deviceGroupFullPath": "*",
+                "deviceDisplayName": "*"
+              }
+            ],
+            "counters": [],
+            "virtualDataPoints": [],
+            "colorThresholds": [
+              {
+                "level": 2,
+                "op": "=",
+                "value": 1,
+                "colorMode": "threshold"
+              }
+            ],
+            "rightLabel": "Feature Drift",
+            "bottomLabel": "0 = No Drift, 1 = Drift Detected"
+          },
+          "displaySettings": {
+            "showAlertStatusBar": true
+          },
+          "type": "bigNumber",
+          "timescale": "1hour",
+          "version": 2,
+          "name": "Feature Drift Status",
+          "description": "Shows 1 if any resource has feature distribution drift (PSI above threshold)"
+        }
+      },
+      {
+        "position": {
+          "col": 4,
+          "row": 1,
+          "sizex": 3,
+          "sizey": 2
+        },
+        "config": {
+          "bigNumberInfo": {
+            "dataPoints": [
+              {
+                "dataSourceFullName": "Scry_Drift",
+                "dataPointName": "HasPredictionDrift",
+                "aggregateFunction": "MAX",
+                "instanceName": "*",
+                "deviceGroupFullPath": "*",
+                "deviceDisplayName": "*"
+              }
+            ],
+            "counters": [],
+            "virtualDataPoints": [],
+            "colorThresholds": [
+              {
+                "level": 2,
+                "op": "=",
+                "value": 1,
+                "colorMode": "threshold"
+              }
+            ],
+            "rightLabel": "Prediction Drift",
+            "bottomLabel": "0 = Stable, 1 = Drift Detected"
+          },
+          "displaySettings": {
+            "showAlertStatusBar": true
+          },
+          "type": "bigNumber",
+          "timescale": "1hour",
+          "version": 2,
+          "name": "Prediction Drift Status",
+          "description": "Shows 1 if prediction error patterns have shifted (ADWIN detection)"
+        }
+      },
+      {
+        "position": {
+          "col": 7,
+          "row": 1,
+          "sizex": 3,
+          "sizey": 2
+        },
+        "config": {
+          "bigNumberInfo": {
+            "dataPoints": [
+              {
+                "dataSourceFullName": "Scry_Anomaly",
+                "dataPointName": "IsAnomaly",
+                "aggregateFunction": "SUM",
+                "instanceName": "*",
+                "deviceGroupFullPath": "*",
+                "deviceDisplayName": "*"
+              }
+            ],
+            "counters": [],
+            "virtualDataPoints": [],
+            "colorThresholds": [
+              {
+                "level": 1,
+                "op": ">=",
+                "value": 1,
+                "colorMode": "threshold"
+              },
+              {
+                "level": 2,
+                "op": ">=",
+                "value": 3,
+                "colorMode": "threshold"
+              }
+            ],
+            "rightLabel": "Active Anomalies",
+            "bottomLabel": "Resources with anomalies"
+          },
+          "displaySettings": {
+            "showAlertStatusBar": true
+          },
+          "type": "bigNumber",
+          "timescale": "1hour",
+          "version": 2,
+          "name": "Active Anomalies",
+          "description": "Count of resources with forecast anomalies detected"
+        }
+      },
+      {
+        "position": {
+          "col": 10,
+          "row": 1,
+          "sizex": 3,
+          "sizey": 2
+        },
+        "config": {
+          "bigNumberInfo": {
+            "dataPoints": [
+              {
+                "dataSourceFullName": "Scry_Anomaly",
+                "dataPointName": "Severity",
+                "aggregateFunction": "MAX",
+                "instanceName": "*",
+                "deviceGroupFullPath": "*",
+                "deviceDisplayName": "*"
+              }
+            ],
+            "counters": [],
+            "virtualDataPoints": [],
+            "colorThresholds": [
+              {
+                "level": 1,
+                "op": ">=",
+                "value": 2,
+                "colorMode": "threshold"
+              },
+              {
+                "level": 2,
+                "op": ">=",
+                "value": 3,
+                "colorMode": "threshold"
+              }
+            ],
+            "rightLabel": "Max Severity",
+            "bottomLabel": "1=Low 2=Med 3=High 4=Crit"
+          },
+          "displaySettings": {
+            "showAlertStatusBar": true
+          },
+          "type": "bigNumber",
+          "timescale": "1hour",
+          "version": 2,
+          "name": "Max Anomaly Severity",
+          "description": "Highest anomaly severity across all resources"
+        }
+      },
+      {
+        "position": {
+          "col": 1,
+          "row": 3,
+          "sizex": 6,
+          "sizey": 4
+        },
+        "config": {
+          "graphInfo": {
+            "dataPoints": [
+              {
+                "dataSourceFullName": "Scry_Drift",
+                "dataPointName": "MaxPsiValue",
+                "aggregateFunction": "MAX",
+                "instanceName": "*",
+                "deviceGroupFullPath": "*",
+                "deviceDisplayName": "*"
+              },
+              {
+                "dataSourceFullName": "Scry_Drift",
+                "dataPointName": "PsiThreshold",
+                "aggregateFunction": "AVG",
+                "instanceName": "*",
+                "deviceGroupFullPath": "*",
+                "deviceDisplayName": "*"
+              }
+            ],
+            "counters": [],
+            "virtualDataPoints": [],
+            "groupBy": "datapoint"
+          },
+          "displaySettings": {
+            "showAlertStatusBar": true,
+            "showGlobalAlertStatusBar": false,
+            "plotType": "line",
+            "legend": true
+          },
+          "type": "cgraph",
+          "timescale": "1day",
+          "version": 2,
+          "name": "Feature Drift (PSI) Trend",
+          "description": "Max PSI value over time with threshold reference line"
+        }
+      },
+      {
+        "position": {
+          "col": 7,
+          "row": 3,
+          "sizex": 6,
+          "sizey": 4
+        },
+        "config": {
+          "graphInfo": {
+            "dataPoints": [
+              {
+                "dataSourceFullName": "Scry_Drift",
+                "dataPointName": "DriftScore",
+                "aggregateFunction": "MAX",
+                "instanceName": "*",
+                "deviceGroupFullPath": "*",
+                "deviceDisplayName": "*"
+              },
+              {
+                "dataSourceFullName": "Scry_Drift",
+                "dataPointName": "DriftThreshold",
+                "aggregateFunction": "AVG",
+                "instanceName": "*",
+                "deviceGroupFullPath": "*",
+                "deviceDisplayName": "*"
+              }
+            ],
+            "counters": [],
+            "virtualDataPoints": [],
+            "groupBy": "datapoint"
+          },
+          "displaySettings": {
+            "showAlertStatusBar": true,
+            "showGlobalAlertStatusBar": false,
+            "plotType": "line",
+            "legend": true
+          },
+          "type": "cgraph",
+          "timescale": "1day",
+          "version": 2,
+          "name": "Prediction Drift (ADWIN) Trend",
+          "description": "ADWIN drift score over time with threshold reference line"
+        }
+      },
+      {
+        "position": {
+          "col": 1,
+          "row": 7,
+          "sizex": 6,
+          "sizey": 4
+        },
+        "config": {
+          "graphInfo": {
+            "dataPoints": [
+              {
+                "dataSourceFullName": "Scry_Anomaly",
+                "dataPointName": "AnomalyScore",
+                "aggregateFunction": "MAX",
+                "instanceName": "*",
+                "deviceGroupFullPath": "*",
+                "deviceDisplayName": "*"
+              }
+            ],
+            "counters": [],
+            "virtualDataPoints": [],
+            "groupBy": "device"
+          },
+          "displaySettings": {
+            "showAlertStatusBar": true,
+            "showGlobalAlertStatusBar": false,
+            "plotType": "line",
+            "legend": true
+          },
+          "type": "cgraph",
+          "timescale": "1day",
+          "version": 2,
+          "name": "Anomaly Score Trend",
+          "description": "Anomaly score over time by resource"
+        }
+      },
+      {
+        "position": {
+          "col": 7,
+          "row": 7,
+          "sizex": 6,
+          "sizey": 4
+        },
+        "config": {
+          "graphInfo": {
+            "dataPoints": [
+              {
+                "dataSourceFullName": "Scry_Anomaly",
+                "dataPointName": "ViolatedMetricCount",
+                "aggregateFunction": "MAX",
+                "instanceName": "*",
+                "deviceGroupFullPath": "*",
+                "deviceDisplayName": "*"
+              }
+            ],
+            "counters": [],
+            "virtualDataPoints": [],
+            "groupBy": "device"
+          },
+          "displaySettings": {
+            "showAlertStatusBar": true,
+            "showGlobalAlertStatusBar": false,
+            "plotType": "line",
+            "legend": true
+          },
+          "type": "cgraph",
+          "timescale": "1day",
+          "version": 2,
+          "name": "Violated Metrics Trend",
+          "description": "Count of metrics violating forecast bounds over time by resource"
+        }
+      }
+    ]
+  }
+}

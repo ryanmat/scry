@@ -1,0 +1,395 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Description: LogicMonitor DataSource for collecting predictions from Scry API. -->
+<!-- Description: Polls the prediction endpoint and stores cluster state as metrics. -->
+<feed  version="1.0" ha498="true">
+  <header>
+    <company>Scry</company>
+    <feedtype>DATASOURCES</feedtype>
+    <feedversion>1</feedversion>
+    <checksum></checksum>
+  </header>
+  <body>
+    <DATASOURCE>
+      <id></id>
+      <name>Scry_Predictive</name>
+      <displayedas>Scry Predictive</displayedas>
+      <description>Collects ML-based predictions for monitored resources from the Scry Predictive API. Stores prediction cluster state, confidence, and priority as metrics for dashboards and alerting.</description>
+      <group>Scry</group>
+      <tags></tags>
+      <auditVersion></auditVersion>
+      <checksum></checksum>
+      <appliesTo>scry.enabled == "true"</appliesTo>
+      <techType>SCRIPT</techType>
+      <collectMethod>script</collectMethod>
+      <hasMultiInstances>false</hasMultiInstances>
+      <useWildValueAsUniqueIdentifier>false</useWildValueAsUniqueIdentifier>
+      <collectInterval>5</collectInterval>
+      <dataPoints>
+        <dataPoint>
+          <id></id>
+          <name>ClusterId</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Prediction cluster ID (0=NORMAL, 1=PRE_SCALE, 2=PRE_FAILURE, 3=ACTIVE_DEGRADATION, 4=ANOMALY)</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>ClusterId</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr></alertExpr>
+          <alertExprNote></alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>ClusterId</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>Confidence</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Prediction confidence as percentage (0-100)</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>Confidence</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>&lt; 60 warn</alertExpr>
+          <alertExprNote>Low prediction confidence may indicate model needs retraining</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>Confidence</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>Priority</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Priority level (1=LOW, 2=MEDIUM, 3=HIGH)</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>Priority</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>&gt;= 3 error &gt;= 2 warn</alertExpr>
+          <alertExprNote>HIGH priority indicates predicted issue requiring attention</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>Priority</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>IsNormal</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>1 if NORMAL state, 0 otherwise</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>IsNormal</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>= 0 error</alertExpr>
+          <alertExprNote>Resource predicted to be in non-normal state</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>IsNormal</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>NeedsAction</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>1 if action recommended, 0 otherwise</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>NeedsAction</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>= 1 error</alertExpr>
+          <alertExprNote>Prediction indicates action is recommended</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>NeedsAction</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>ApiLatencyMs</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>API response time in milliseconds</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>ApiLatencyMs</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>&gt; 5000 error &gt; 1000 warn</alertExpr>
+          <alertExprNote>Prediction API response time degradation</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>ApiLatencyMs</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>ApiStatus</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>1 if API healthy, 0 if error</description>
+          <maxValue></maxValue>
+          <minValue></minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>ApiStatus</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>0</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>= 0 error</alertExpr>
+          <alertExprNote>Prediction API unreachable</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>ApiStatus</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+      </dataPoints>
+      <graphs>
+        <graph>
+          <id></id>
+          <name>Prediction State</name>
+          <title>Prediction State</title>
+          <verticallabel>Cluster ID</verticallabel>
+          <rigid>false</rigid>
+          <maxValue>NaN</maxValue>
+          <minValue>NaN</minValue>
+          <displayPrio>1</displayPrio>
+          <timescale>1day</timescale>
+          <base1024>false</base1024>
+          <graphDataPoints>
+            <graphDataPoint>
+              <name>ClusterId</name>
+              <datapointName>ClusterId</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+          </graphDataPoints>
+          <virtualDataPoints></virtualDataPoints>
+        </graph>
+        <graph>
+          <id></id>
+          <name>Prediction Confidence</name>
+          <title>Prediction Confidence</title>
+          <verticallabel>Percent</verticallabel>
+          <rigid>false</rigid>
+          <maxValue>100</maxValue>
+          <minValue>0</minValue>
+          <displayPrio>2</displayPrio>
+          <timescale>1day</timescale>
+          <base1024>false</base1024>
+          <graphDataPoints>
+            <graphDataPoint>
+              <name>Confidence</name>
+              <datapointName>Confidence</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+          </graphDataPoints>
+          <virtualDataPoints></virtualDataPoints>
+        </graph>
+        <graph>
+          <id></id>
+          <name>API Health</name>
+          <title>Prediction API Health</title>
+          <verticallabel></verticallabel>
+          <rigid>false</rigid>
+          <maxValue>NaN</maxValue>
+          <minValue>NaN</minValue>
+          <displayPrio>3</displayPrio>
+          <timescale>1day</timescale>
+          <base1024>false</base1024>
+          <graphDataPoints>
+            <graphDataPoint>
+              <name>ApiStatus</name>
+              <datapointName>ApiStatus</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+            <graphDataPoint>
+              <name>ApiLatencyMs</name>
+              <datapointName>ApiLatencyMs</datapointName>
+              <cf>1</cf>
+            </graphDataPoint>
+          </graphDataPoints>
+          <virtualDataPoints></virtualDataPoints>
+        </graph>
+      </graphs>
+      <overviewGraphs></overviewGraphs>
+      <scripts>
+        <groovyScript><![CDATA[
+// Description: Collects predictions from Scry Predictive API.
+// Description: Stores prediction state as metrics on the resource.
+
+import com.santaba.agent.groovyapi.http.*
+import groovy.json.JsonSlurper
+
+// Configuration
+def apiUrl = hostProps.get("scry.api.url") ?: "https://your-scry-api.example.com"
+def resourceId = hostProps.get("system.displayName")
+def timeout = 10000 // 10 seconds
+
+// Priority mapping
+def priorityMap = [
+    "LOW": 1,
+    "MEDIUM": 2,
+    "HIGH": 3
+]
+
+// Action mapping (which clusters need action)
+def actionClusters = ["PRE_SCALE", "PRE_FAILURE", "ACTIVE_DEGRADATION", "ANOMALY"]
+
+try {
+    def startTime = System.currentTimeMillis()
+
+    // Build request URL
+    def encodedResourceId = URLEncoder.encode(resourceId, "UTF-8")
+
+    // Make HTTP request
+    def httpClient = HTTP.open(apiUrl, timeout)
+    def response = httpClient.get("/predict/lookup?resource_id=${encodedResourceId}")
+    def responseTime = System.currentTimeMillis() - startTime
+
+    if (response.getStatusCode() == 200) {
+        def json = new JsonSlurper().parseText(response.getBody())
+
+        // Extract values
+        def clusterId = json.cluster_id ?: 0
+        def clusterName = json.cluster_name ?: "NORMAL"
+        def confidence = (json.confidence ?: 0.0) * 100  // Convert to percentage
+        def priority = priorityMap[json.priority] ?: 1
+        def isNormal = (clusterName == "NORMAL") ? 1 : 0
+        def needsAction = actionClusters.contains(clusterName) ? 1 : 0
+
+        // Output metrics
+        println "ClusterId=${clusterId}"
+        println "Confidence=${confidence}"
+        println "Priority=${priority}"
+        println "IsNormal=${isNormal}"
+        println "NeedsAction=${needsAction}"
+        println "ApiLatencyMs=${responseTime}"
+        println "ApiStatus=1"
+
+    } else {
+        // API returned error
+        println "ClusterId=0"
+        println "Confidence=0"
+        println "Priority=1"
+        println "IsNormal=1"
+        println "NeedsAction=0"
+        println "ApiLatencyMs=${responseTime}"
+        println "ApiStatus=0"
+    }
+
+} catch (Exception e) {
+    // Connection or parsing error
+    println "ClusterId=0"
+    println "Confidence=0"
+    println "Priority=1"
+    println "IsNormal=1"
+    println "NeedsAction=0"
+    println "ApiLatencyMs=0"
+    println "ApiStatus=0"
+}
+
+return 0
+]]></groovyScript>
+      </scripts>
+    </DATASOURCE>
+  </body>
+</feed>
