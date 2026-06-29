@@ -280,7 +280,7 @@ def create_app(model_path: str | None = None) -> FastAPI:
                     detail=f"No recent metrics found for resource '{resource_id}'",
                 )
 
-            numerical, categorical = _split_by_profile(df)
+            numerical, categorical = _split_by_profile(df, os.environ.get("SCRY_PROFILE"))
             if not numerical:
                 raise HTTPException(
                     status_code=404,

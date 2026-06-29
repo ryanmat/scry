@@ -22,6 +22,7 @@ import re
 import sys
 from datetime import datetime, timedelta, timezone
 
+from scry.data.feature_engineering import set_active_profile
 from scry.data.fetcher import DataFetcher
 from scry.data.pipeline import XDECFeaturePipeline
 from scry.utils.config import get_config
@@ -57,6 +58,8 @@ async def _extract(args: argparse.Namespace) -> tuple[XDECFeaturePipeline, dict]
             raw = await pipeline.extract(start, end, profile=args.profile)
             return pipeline, pipeline.transform(raw)
 
+    if args.profile:
+        set_active_profile(args.profile)
     fetcher = DataFetcher.from_object_store(args.data, data_format=args.format)
     pipeline = XDECFeaturePipeline(fetcher, config)
     raw = await pipeline.extract(start, end, profile=args.profile)

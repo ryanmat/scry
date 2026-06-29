@@ -330,6 +330,67 @@ profiles:
       - Active
       - isAlive
 
+  # LogicMonitor Collector Self-Monitoring (petclinic capture subset)
+  # Datasources: LogicMonitor_Collector_*
+  # Metric names confirmed present in data/captures/petclinic_collector_14d.parquet
+  # and data/captures/petclinic_status_14d.parquet.
+  petclinic_collector:
+    description: "LogicMonitor Collector metrics captured from the petclinic-vm collector"
+    numerical_features:
+      - ExecuteTime
+      - SuccessExecuteTime
+      - SuccessRate
+      - FailureRate
+      - ExecutingTasks
+      - InstanceCount
+      - TasksCountInQueue
+      - PostProcessTime
+      - PrepareTime
+      - SendtoReporterTime
+      - ProcessExecuteTime
+      - ProcessSuccessRate
+      - ReceiveRate
+      - RequestRate
+      - MaxExecuteTime
+      - CollectTime
+      - NanTaskRate
+      - CollectorCPU
+      - CollectorMemory
+      - LinuxCollectorCPU
+      - SbproxyCPU
+      - SbproxyMemory
+    categorical_features:
+      - Active
+
+  # ARO Node Metrics (Azure Red Hat OpenShift, KSM node datasource)
+  # Datasources: Kubernetes_KSM_Nodes, Kubernetes_KSM_NodeSummary
+  # Metric names confirmed present in data/captures/aro_nodes_14d.parquet.
+  aro_node:
+    description: "ARO node metrics from KSM and node summary datasources"
+    numerical_features:
+      - cpuUsageNanoCores
+      - cpuUsageCoreNanoSeconds
+      - cpuUsagePercentage
+      - memoryUsageBytes
+      - memoryWorkingSetBytes
+      - memoryRssBytes
+      - memoryAvailableBytes
+      - memoryPageFaults
+      - memoryMajorPageFaults
+      - fsUsedBytes
+      - fsAvailableBytes
+      - fsInodesUsed
+      - networkRxBytes
+      - networkTxBytes
+      - nodeUptime
+      - kubeNodeStatusAllocatableCpu
+      - kubeNodeStatusAllocatableMemory
+      - kubeNodeStatusCapacityCpu
+      - kubeNodeStatusCapacityMemory
+    categorical_features:
+      - ksmMetricsAvailable
+      - summaryMetricsAvailable
+
   # Application/Service Monitoring (.NET, IIS, Java)
   # Datasources: .NetCLR*, Application Pools-, Microsoft_IIS_*
   application:
@@ -405,6 +466,16 @@ model_config:
     num_hidden: 64
     cat_hidden: 32
     latent_dim: 8
+  petclinic_collector:
+    seq_len: 30
+    num_hidden: 128
+    cat_hidden: 32
+    latent_dim: 16
+  aro_node:
+    seq_len: 30
+    num_hidden: 128
+    cat_hidden: 32
+    latent_dim: 16
 
 # Auto-discovery settings
 auto_discovery:
