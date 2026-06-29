@@ -19,6 +19,7 @@ LogicMonitor is one supported adapter, not the anchor. The default path reads Pa
 <tr><td><b>Forecasting</b></td><td>An optional Chronos layer (<code>scryml[forecast]</code>) projects where each metric is headed across multiple horizons, kept behind an extra so the core stays offline-capable.</td></tr>
 <tr><td><b>Data-source agnostic</b></td><td>Read Parquet or CSV from local disk or object storage (S3, GCS, ADLS, MinIO) through DuckDB. A LogicMonitor REST exporter lives behind <code>scryml[logicmonitor]</code>.</td></tr>
 <tr><td><b>A small HTTP service</b></td><td>FastAPI endpoints for prediction, forecasting, drift, anomaly, and accuracy: <code>/predict</code>, <code>/predict/lookup</code>, <code>/forecast</code>, <code>/drift</code>, <code>/anomaly</code>, <code>/accuracy</code>.</td></tr>
+<tr><td><b>Schema-checked serving</b></td><td>Each trained model carries its feature schema (names, order, profile, normalization). The API aligns incoming metrics by name, so a coverage gap between sources is a checked contract, not a silent misalignment.</td></tr>
 <tr><td><b>Bring your own data</b></td><td>One canonical schema: resource, metric, timestamp, value, plus optional host and datasource fields. Drop your metrics into that table and train. No real telemetry or weights are included.</td></tr>
 </table>
 

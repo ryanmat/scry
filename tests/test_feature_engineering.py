@@ -437,7 +437,7 @@ class TestCategoricalEncoding:
         # Categorical data with various values
         windows = np.array([[[0, 1, 2], [1, 0, 3]], [[1, 1, 1], [0, 0, 0]]])
 
-        encoded = encode_categorical(windows)
+        encoded, _ = encode_categorical(windows)
 
         assert encoded.min() >= 0
         assert encoded.max() <= 1
@@ -448,7 +448,7 @@ class TestCategoricalEncoding:
 
         windows = np.array([[[1, np.nan], [0, 1]]], dtype=float)
 
-        encoded = encode_categorical(windows)
+        encoded, _ = encode_categorical(windows)
 
         assert not np.isnan(encoded).any()
 

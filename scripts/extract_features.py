@@ -50,6 +50,11 @@ async def _extract(args: argparse.Namespace) -> tuple[XDECFeaturePipeline, dict]
     start = _parse_time(args.start, now)
     end = _parse_time(args.end, now)
 
+    # Activate the profile before transform so the persisted feature schema and
+    # the windowed column order both reflect --profile for every source.
+    if args.profile:
+        set_active_profile(args.profile)
+
     if args.httpingest_url:
         from scry.data.sources.http_ingest import HttpIngestClient
 
@@ -58,8 +63,6 @@ async def _extract(args: argparse.Namespace) -> tuple[XDECFeaturePipeline, dict]
             raw = await pipeline.extract(start, end, profile=args.profile)
             return pipeline, pipeline.transform(raw)
 
-    if args.profile:
-        set_active_profile(args.profile)
     fetcher = DataFetcher.from_object_store(args.data, data_format=args.format)
     pipeline = XDECFeaturePipeline(fetcher, config)
     raw = await pipeline.extract(start, end, profile=args.profile)

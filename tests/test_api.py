@@ -50,6 +50,24 @@ def temp_model_path():
                     "mean": np.zeros(9),
                     "std": np.ones(9),
                 },
+                "categorical_normalization": {
+                    "min": np.zeros(8),
+                    "max": np.ones(8),
+                },
+                "feature_schema": {
+                    "numerical": [
+                        "cpuUsageNanoCores", "memoryUsageBytes", "networkRxBytes",
+                        "networkTxBytes", "fsUsedBytes", "cpuLimits", "memoryLimits",
+                        "memoryRequests", "memoryWorkingSetBytes",
+                    ],
+                    "categorical": [
+                        "kubePodStatusReady", "podConditionPhase", "kubePodStatusScheduled",
+                        "kubePodContainerStatusRunning", "kubePodContainerStatusWaiting",
+                        "kubePodContainerStatusTerminated", "kubePodContainerStatusReady",
+                        "status",
+                    ],
+                    "profile": "test",
+                },
             },
             model_path,
         )
@@ -333,3 +351,211 @@ class TestOpenAPI:
         """Test Swagger UI is available."""
         response = test_client.get("/docs")
         assert response.status_code == 200
+
+
+# ARO node ids from the captured data: 3 masters + 5 workers.
+_ARO_IDS = [
+    "rm-oc-cluster-27t8q-master-0-node-rm-aro-cluster",
+    "rm-oc-cluster-27t8q-master-1-node-rm-aro-cluster",
+    "rm-oc-cluster-27t8q-master-2-node-rm-aro-cluster",
+    "rm-oc-cluster-27t8q-worker-eastus1-jm9mz-node-rm-aro-cluster",
+    "rm-oc-cluster-27t8q-worker-eastus1-vb6vs-node-rm-aro-cluster",
+    "rm-oc-cluster-27t8q-worker-eastus2-lp7tj-node-rm-aro-cluster",
+    "rm-oc-cluster-27t8q-worker-eastus2-xwg6l-node-rm-aro-cluster",
+    "rm-oc-cluster-27t8q-worker-eastus3-75cpl-node-rm-aro-cluster",
+]
+
+
+def _resolution_frame() -> pd.DataFrame:
+    """A canonical frame of petclinic-vm plus the 8 ARO nodes (IP host_names)."""
+    ids = ["petclinic-vm", *_ARO_IDS]
+    hosts = ["127.0.0.1", *[f"10.1.12.{i}" for i in range(len(_ARO_IDS))]]
+    return pd.DataFrame(
+        {
+            "resource_id": ids,
+            "host_name": hosts,
+            "metric_name": ["m"] * len(ids),
+            "value": [1.0] * len(ids),
+        }
+    )
+
+
+class TestResourceResolution:
+    """Tests for the exact-preferred -> substring resolution helper."""
+
+    def test_exact_resolves_petclinic_vm(self):
+        from scry.api.main import _resolve_rows
+
+        out = _resolve_rows(_resolution_frame(), "petclinic-vm")
+        assert set(out["resource_id"]) == {"petclinic-vm"}
+
+    def test_exact_is_case_insensitive(self):
+        from scry.api.main import _resolve_rows
+
+        out = _resolve_rows(_resolution_frame(), "PETCLINIC-VM")
+        assert set(out["resource_id"]) == {"petclinic-vm"}
+
+    def test_unique_substring_resolves_master_0(self):
+        from scry.api.main import _resolve_rows
+
+        out = _resolve_rows(_resolution_frame(), "master-0")
+        assert set(out["resource_id"]) == {
+            "rm-oc-cluster-27t8q-master-0-node-rm-aro-cluster"
+        }
+
+    def test_ambiguous_substring_worker_matches_five(self):
+        from scry.api.main import _resolve_rows
+
+        out = _resolve_rows(_resolution_frame(), "worker")
+        assert out["resource_id"].nunique() == 5
+
+    def test_unknown_returns_empty(self):
+        from scry.api.main import _resolve_rows
+
+        out = _resolve_rows(_resolution_frame(), "ghost")
+        assert out.empty
+
+    def test_exact_preferred_over_substring(self):
+        from scry.api.main import _resolve_rows
+
+        df = pd.DataFrame(
+            {
+                "resource_id": ["node", "node-2", "node-3"],
+                "host_name": ["h", "h", "h"],
+                "metric_name": ["m"] * 3,
+                "value": [1.0] * 3,
+            }
+        )
+        out = _resolve_rows(df, "node")
+        assert set(out["resource_id"]) == {"node"}
+
+    def test_exact_host_name_resolves(self):
+        from scry.api.main import _resolve_rows
+
+        df = pd.DataFrame(
+            {
+                "resource_id": ["res-a", "res-b"],
+                "host_name": ["10.0.0.5", "10.0.0.6"],
+                "metric_name": ["m", "m"],
+                "value": [1.0, 1.0],
+            }
+        )
+        out = _resolve_rows(df, "10.0.0.5")
+        assert set(out["resource_id"]) == {"res-a"}
+
+    def test_exact_host_beats_substring(self):
+        from scry.api.main import _resolve_rows
+
+        # The needle exactly matches res-a's host and is a substring of res-b's
+        # host (10.0.0.50); the exact host_name match must win.
+        df = pd.DataFrame(
+            {
+                "resource_id": ["res-a", "res-b"],
+                "host_name": ["10.0.0.5", "10.0.0.50"],
+                "metric_name": ["m", "m"],
+                "value": [1.0, 1.0],
+            }
+        )
+        out = _resolve_rows(df, "10.0.0.5")
+        assert set(out["resource_id"]) == {"res-a"}
+
+    def test_substring_fallback_is_literal_not_regex(self):
+        from scry.api.main import _resolve_rows
+
+        # Needle "a.c" matches the literal host "xa.cy" but must NOT regex-match
+        # "xabcy" (where '.' would be a wildcard).
+        df = pd.DataFrame(
+            {
+                "resource_id": ["dotted", "plain"],
+                "host_name": ["xa.cy", "xabcy"],
+                "metric_name": ["m", "m"],
+                "value": [1.0, 1.0],
+            }
+        )
+        out = _resolve_rows(df, "a.c")
+        assert set(out["resource_id"]) == {"dotted"}
+
+
+class TestPredictLookupAmbiguity:
+    """The lookup endpoint refuses to pool multiple resources into one prediction."""
+
+    def test_ambiguous_lookup_returns_409(self, test_client):
+        workers = [i for i in _ARO_IDS if "worker" in i]
+        df = pd.DataFrame(
+            {
+                "resource_id": workers,
+                "host_name": [f"10.1.12.{i}" for i in range(len(workers))],
+                "metric_name": ["m"] * len(workers),
+                "value": [1.0] * len(workers),
+            }
+        )
+        with (
+            patch("scry.api.main._resource_metrics", new=AsyncMock(return_value=df)),
+            patch.object(Predictor, "predict") as mock_predict,
+        ):
+            response = test_client.get("/predict/lookup?resource_id=worker")
+
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert len(detail["candidates"]) == 5
+        assert detail["candidates"] == sorted(workers)
+        mock_predict.assert_not_called()
+
+    def test_ambiguous_lookup_caps_candidates_at_20(self, test_client):
+        ids = [f"node-{i:03d}" for i in range(25)]
+        df = pd.DataFrame(
+            {
+                "resource_id": ids,
+                "host_name": [f"10.0.0.{i}" for i in range(25)],
+                "metric_name": ["m"] * 25,
+                "value": [1.0] * 25,
+            }
+        )
+        with patch("scry.api.main._resource_metrics", new=AsyncMock(return_value=df)):
+            response = test_client.get("/predict/lookup", params={"resource_id": "node"})
+
+        assert response.status_code == 409
+        candidates = response.json()["detail"]["candidates"]
+        assert len(candidates) == 20  # capped from 25 matches
+        assert candidates == sorted(ids)[:20]
+
+
+class TestSchemaLessStartup:
+    """A schema-less checkpoint degrades the API to unhealthy rather than crashing."""
+
+    def test_schema_less_checkpoint_degrades_health(self, tmp_path):
+        from scry.api.main import create_app
+
+        model = TemporalXDEC(
+            num_numerical=9,
+            num_categorical=8,
+            seq_len=30,
+            num_hidden=64,
+            cat_hidden=32,
+            latent_dim=8,
+            n_clusters=5,
+        )
+        path = tmp_path / "old_model.pt"
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "config": {
+                    "num_numerical": 9,
+                    "num_categorical": 8,
+                    "seq_len": 30,
+                    "num_hidden": 64,
+                    "cat_hidden": 32,
+                    "latent_dim": 8,
+                    "n_clusters": 5,
+                },
+                "normalization": {"mean": np.zeros(9), "std": np.ones(9)},
+            },
+            path,
+        )
+
+        app = create_app(model_path=str(path))
+        client = TestClient(app)
+        response = client.get("/health")
+
+        assert response.status_code == 200
+        assert response.json()["model_loaded"] is False

@@ -168,6 +168,24 @@ class TestXDECFeaturePipeline:
             original["num_norm_params"]["mean"], loaded["num_norm_params"]["mean"]
         )
 
+        # Feature schema must round-trip order-exact, and categorical encoding
+        # params must survive, so the trained model can align metrics by name.
+        assert (
+            loaded["feature_names"]["numerical"]
+            == original["feature_names"]["numerical"]
+        )
+        assert (
+            loaded["feature_names"]["categorical"]
+            == original["feature_names"]["categorical"]
+        )
+        assert loaded["profile"] == original["profile"]
+        np.testing.assert_array_almost_equal(
+            original["cat_norm_params"]["min"], loaded["cat_norm_params"]["min"]
+        )
+        np.testing.assert_array_almost_equal(
+            original["cat_norm_params"]["max"], loaded["cat_norm_params"]["max"]
+        )
+
     def test_create_dataset_returns_valid_dataset(
         self, mock_fetcher: MagicMock, mock_config: MagicMock, sample_raw_data: pd.DataFrame
     ) -> None:

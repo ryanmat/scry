@@ -27,3 +27,13 @@ Land this table as Parquet or CSV. Partitioning by time (`year=/month=/day=/hour
 ## LogicMonitor (optional adapter)
 
 The `scry[logicmonitor]` extra ships an exporter (`scripts/export_logicmonitor.py`) that writes this canonical table directly from the LogicMonitor REST API; see [ingestion.md](ingestion.md). No intermediate service is required. A legacy HttpIngest adapter that reads from an external `/api/ml/*` service also exists for backward compatibility and is slated for removal.
+
+## Feature schema and alignment
+
+A trained model carries its feature schema in the checkpoint: the ordered numerical and categorical feature names, the profile they came from, and the per-feature normalization (numerical mean/std) and encoding (categorical min/max) params. The schema is the model's input contract.
+
+At serve time, incoming metrics are aligned to the model's input columns by name, not by the order they arrive in. A feature the model expects but the request omits is filled with that feature's mean (a neutral input); a metric the model does not know is ignored. This makes coverage differences between ingestion routes a checked contract rather than a silent misalignment. A checkpoint that predates schema persistence has no names to align against and is rejected at load; retrain it to regenerate the schema. `/predict/lookup` groups a resource's metrics into numerical and categorical sets using the model's own training profile, so a mismatched `SCRY_PROFILE` cannot misalign the split.
+
+## /predict/lookup resource keying
+
+`resource_id` is the canonical key and is always present; `host_name` is optional. Lookup matching is case-insensitive and resolves in this order: exact `resource_id`, then exact `host_name`, then a substring fallback on either. If a lookup resolves to more than one distinct `resource_id` (for example, the substring `worker` across several worker nodes), the endpoint returns `409` with the candidate ids instead of pooling their metrics into one prediction. Pass an exact id to disambiguate.

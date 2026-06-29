@@ -16,6 +16,7 @@ from scry.data.feature_engineering import (
     create_dual_windows,
     encode_categorical,
     filter_target_metrics,
+    get_active_config,
     normalize_numerical,
     pivot_metrics,
     split_by_type,
@@ -91,11 +92,18 @@ class XDECFeaturePipeline:
                 - num_norm_params: Normalization parameters {mean, std}
         """
         if df.empty:
+            cfg = get_active_config()
+            num_names = list(cfg.numerical_features)
+            cat_names = list(cfg.categorical_features)
+            n_num, n_cat = len(num_names), len(cat_names)
             return {
-                "num_windows": np.zeros((0, self._config.sequence_length, 9)),
-                "cat_windows": np.zeros((0, self._config.sequence_length, 8)),
+                "num_windows": np.zeros((0, self._config.sequence_length, n_num)),
+                "cat_windows": np.zeros((0, self._config.sequence_length, n_cat)),
                 "labels": np.zeros((0, 2), dtype=object),
-                "num_norm_params": {"mean": np.zeros(9), "std": np.ones(9)},
+                "num_norm_params": {"mean": np.zeros(n_num), "std": np.ones(n_num)},
+                "cat_norm_params": {"min": np.zeros(n_cat), "max": np.ones(n_cat)},
+                "feature_names": {"numerical": num_names, "categorical": cat_names},
+                "profile": cfg.profile_name,
             }
 
         # Step 1: Pivot from long to wide format
@@ -106,6 +114,13 @@ class XDECFeaturePipeline:
 
         # Step 3: Split into numerical and categorical
         df_num, df_cat = split_by_type(filtered)
+
+        # Capture the ordered, present feature names (these are the exact window
+        # columns) and the active profile, so the model can align by name later.
+        base_cols = ("resource_id", "timestamp")
+        num_names = [c for c in df_num.columns if c not in base_cols]
+        cat_names = [c for c in df_cat.columns if c not in base_cols]
+        profile = get_active_config().profile_name
 
         # Step 4: Create dual sliding windows
         num_windows, cat_windows, labels = create_dual_windows(
@@ -121,20 +136,32 @@ class XDECFeaturePipeline:
                 "num_windows": num_windows,
                 "cat_windows": cat_windows,
                 "labels": labels,
-                "num_norm_params": {"mean": np.zeros(9), "std": np.ones(9)},
+                "num_norm_params": {
+                    "mean": np.zeros(len(num_names)),
+                    "std": np.ones(len(num_names)),
+                },
+                "cat_norm_params": {
+                    "min": np.zeros(len(cat_names)),
+                    "max": np.ones(len(cat_names)),
+                },
+                "feature_names": {"numerical": num_names, "categorical": cat_names},
+                "profile": profile,
             }
 
         # Step 5: Normalize numerical features
         num_normalized, num_params = normalize_numerical(num_windows)
 
         # Step 6: Encode categorical features
-        cat_encoded = encode_categorical(cat_windows)
+        cat_encoded, cat_params = encode_categorical(cat_windows)
 
         return {
             "num_windows": num_normalized,
             "cat_windows": cat_encoded,
             "labels": labels,
             "num_norm_params": num_params,
+            "cat_norm_params": cat_params,
+            "feature_names": {"numerical": num_names, "categorical": cat_names},
+            "profile": profile,
         }
 
     async def run(
@@ -168,6 +195,11 @@ class XDECFeaturePipeline:
             labels=data["labels"],
             num_norm_mean=data["num_norm_params"]["mean"],
             num_norm_std=data["num_norm_params"]["std"],
+            cat_norm_min=data["cat_norm_params"]["min"],
+            cat_norm_max=data["cat_norm_params"]["max"],
+            num_feature_names=np.array(data["feature_names"]["numerical"], dtype=object),
+            cat_feature_names=np.array(data["feature_names"]["categorical"], dtype=object),
+            profile=data["profile"],
         )
 
     def load_training_data(self, path: str) -> dict[str, Any]:
@@ -189,6 +221,15 @@ class XDECFeaturePipeline:
                 "mean": loaded["num_norm_mean"],
                 "std": loaded["num_norm_std"],
             },
+            "cat_norm_params": {
+                "min": loaded["cat_norm_min"],
+                "max": loaded["cat_norm_max"],
+            },
+            "feature_names": {
+                "numerical": [str(x) for x in loaded["num_feature_names"]],
+                "categorical": [str(x) for x in loaded["cat_feature_names"]],
+            },
+            "profile": str(loaded["profile"]),
         }
 
     def create_dataset(self, data: dict[str, Any]) -> XDECDataset:

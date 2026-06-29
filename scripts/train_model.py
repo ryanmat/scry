@@ -218,10 +218,29 @@ def load_data(data_path: str) -> tuple:
             "std": data["num_norm_std"],
         }
 
+    cat_params = None
+    if "cat_norm_min" in data and "cat_norm_max" in data:
+        cat_params = {
+            "min": data["cat_norm_min"],
+            "max": data["cat_norm_max"],
+        }
+
+    # Feature names are the model's input contract; without them the served
+    # model cannot align incoming metrics by name.
+    if "num_feature_names" not in data or "cat_feature_names" not in data:
+        raise ValueError(
+            f"Training data {data_path} is missing feature-name arrays "
+            "(num_feature_names/cat_feature_names). Re-extract it with the current "
+            "scripts/extract_features.py so the model can persist its feature schema."
+        )
+    num_names = [str(x) for x in data["num_feature_names"]]
+    cat_names = [str(x) for x in data["cat_feature_names"]]
+    profile = str(data["profile"]) if "profile" in data else None
+
     print(f"  Numerical windows: {num_windows.shape}")
     print(f"  Categorical windows: {cat_windows.shape}")
 
-    return num_windows, cat_windows, norm_params
+    return num_windows, cat_windows, norm_params, cat_params, num_names, cat_names, profile
 
 
 def create_dataloaders(
@@ -284,7 +303,9 @@ def main():
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Load data
-    num_windows, cat_windows, norm_params = load_data(args.data)
+    num_windows, cat_windows, norm_params, cat_params, num_names, cat_names, profile = (
+        load_data(args.data)
+    )
 
     # Subsample if requested
     if args.subsample < 1.0:
@@ -299,6 +320,21 @@ def main():
     # Infer dimensions from data
     seq_len, num_numerical = num_windows.shape[1], num_windows.shape[2]
     num_categorical = cat_windows.shape[2]
+
+    # The feature schema must line up with the array dimensions, or by-name
+    # alignment at serve time would be silently wrong.
+    if len(num_names) != num_numerical:
+        raise ValueError(
+            f"Numerical feature-name count ({len(num_names)}) does not match the "
+            f"numerical window dimension ({num_numerical}). The training data is "
+            "inconsistent; re-extract it with scripts/extract_features.py."
+        )
+    if len(cat_names) != num_categorical:
+        raise ValueError(
+            f"Categorical feature-name count ({len(cat_names)}) does not match the "
+            f"categorical window dimension ({num_categorical}). The training data is "
+            "inconsistent; re-extract it with scripts/extract_features.py."
+        )
 
     print("\nModel configuration:")
     print(f"  Sequence length: {seq_len}")
@@ -420,6 +456,12 @@ def main():
             "n_clusters": args.num_clusters,
         },
         "normalization": norm_params,
+        "categorical_normalization": cat_params,
+        "feature_schema": {
+            "numerical": num_names,
+            "categorical": cat_names,
+            "profile": profile,
+        },
         "history": history,
         "metrics": {
             "silhouette_score": metrics["silhouette_score"],

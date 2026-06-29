@@ -51,6 +51,12 @@ def temp_model_path():
                     "num_hidden": 64, "cat_hidden": 32, "latent_dim": 8, "n_clusters": 5,
                 },
                 "normalization": {"mean": np.zeros(9), "std": np.ones(9)},
+                "categorical_normalization": {"min": np.zeros(8), "max": np.ones(8)},
+                "feature_schema": {
+                    "numerical": [f"num{i}" for i in range(9)],
+                    "categorical": [f"cat{i}" for i in range(8)],
+                    "profile": "test",
+                },
             },
             model_path,
         )

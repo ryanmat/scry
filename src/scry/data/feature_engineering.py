@@ -343,7 +343,9 @@ def normalize_numerical(
     return normalized, params
 
 
-def encode_categorical(windows: np.ndarray) -> np.ndarray:
+def encode_categorical(
+    windows: np.ndarray,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     """Encode categorical windows to [0, 1] range.
 
     Binary features (0/1) are kept as-is.
@@ -353,18 +355,27 @@ def encode_categorical(windows: np.ndarray) -> np.ndarray:
         windows: Array of shape (n, window_size, n_features).
 
     Returns:
-        Encoded windows with values in [0, 1].
+        Tuple of:
+            - encoded: Windows with values in [0, 1].
+            - params: Dict with 'min' and 'max' arrays per feature, so the same
+              encoding can be reproduced at inference time.
     """
     windows = windows.copy()
 
     # Handle NaN by filling with 0 (most common default state)
     windows = np.nan_to_num(windows, nan=0.0)
 
+    n_features = windows.shape[2]
+    mins = np.zeros(n_features)
+    maxs = np.zeros(n_features)
+
     # Normalize each feature to [0, 1]
-    for i in range(windows.shape[2]):
+    for i in range(n_features):
         feature_data = windows[:, :, i]
         min_val = feature_data.min()
         max_val = feature_data.max()
+        mins[i] = min_val
+        maxs[i] = max_val
 
         if max_val > min_val:
             windows[:, :, i] = (feature_data - min_val) / (max_val - min_val)
@@ -372,7 +383,7 @@ def encode_categorical(windows: np.ndarray) -> np.ndarray:
             # All same value, set to 0 or 1 depending on value
             windows[:, :, i] = 1.0 if max_val > 0 else 0.0
 
-    return windows
+    return windows, {"min": mins, "max": maxs}
 
 
 class XDECDataset(Dataset):
