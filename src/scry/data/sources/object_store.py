@@ -85,8 +85,10 @@ def _load_all_profiles() -> dict[str, dict[str, Any]]:
 
 
 # A series is "live" when its last sample is within this many inferred intervals
-# of the reference time.
-_FRESH_K = 2
+# of the reference time. Four tolerates normal cadence/phase jitter (a metric a
+# poll or two behind the freshest one) while still flagging series that have
+# genuinely stopped reporting.
+_FRESH_K = 4
 
 
 class ObjectStoreSource(DataSource):
