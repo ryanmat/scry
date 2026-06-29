@@ -35,12 +35,14 @@ def _q(value: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def _load_profile_metrics(profile: str) -> list[str]:
-    """Load the metric names for a profile from config/features.yaml.
+def _features_config() -> dict[str, Any]:
+    """Parse ``config/features.yaml`` and return its contents.
 
     Checks ``SCRY_FEATURES_PATH``, then searches upward from this file and the
-    working directory for ``config/features.yaml``. Returns an empty list (no
-    filter) if the file or the profile is not found.
+    working directory for ``config/features.yaml``. Returns an empty dict when no
+    config is found. This is the source's own profile resolution; it intentionally
+    uses ``SCRY_FEATURES_PATH`` so coverage and the ``fetch_metrics`` profile
+    filter agree on a profile's feature set.
     """
     import yaml
 
@@ -55,14 +57,31 @@ def _load_profile_metrics(profile: str) -> list[str]:
     for path in candidates:
         if path.is_file():
             with open(path) as f:
-                cfg = yaml.safe_load(f) or {}
-            p = cfg.get("profiles", {}).get(profile)
-            if not p:
-                return []
-            return list(p.get("numerical_features", [])) + list(
-                p.get("categorical_features", [])
-            )
-    return []
+                return yaml.safe_load(f) or {}
+    return {}
+
+
+def _load_profile_metrics(profile: str) -> list[str]:
+    """Load the combined numerical+categorical metric names for one profile.
+
+    Returns an empty list (no filter) when the config or the profile is absent.
+    """
+    p = _features_config().get("profiles", {}).get(profile)
+    if not p:
+        return []
+    return list(p.get("numerical_features", [])) + list(p.get("categorical_features", []))
+
+
+def _load_all_profiles() -> dict[str, dict[str, Any]]:
+    """Map every profile name to its description and combined feature-name list."""
+    out: dict[str, dict[str, Any]] = {}
+    for name, p in _features_config().get("profiles", {}).items():
+        out[name] = {
+            "description": p.get("description", ""),
+            "features": list(p.get("numerical_features", []))
+            + list(p.get("categorical_features", [])),
+        }
+    return out
 
 
 class ObjectStoreSource(DataSource):
@@ -232,3 +251,47 @@ class ObjectStoreSource(DataSource):
             "earliest_timestamp": str(row["earliest_timestamp"]),
             "latest_timestamp": str(row["latest_timestamp"]),
         }
+
+    async def get_profile_coverage(self) -> dict[str, Any]:
+        """Report feature coverage for every profile over the available data.
+
+        For each profile in ``config/features.yaml``, intersects its expected
+        feature names with the distinct ``metric_name`` values present in the
+        store. A profile with no expected features is reported as fully covered
+        (it requires nothing), which avoids a spurious low-coverage warning.
+
+        Returns:
+            ``{"profiles": [{name, description, coverage_percent, available,
+            missing, total_expected, total_available}]}``.
+        """
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                f"SELECT DISTINCT metric_name FROM {self._read_expr()} "
+                "WHERE metric_name IS NOT NULL"
+            ).fetchall()
+        finally:
+            conn.close()
+        present = {r[0] for r in rows}
+
+        profiles: list[dict[str, Any]] = []
+        for name, meta in _load_all_profiles().items():
+            expected = set(meta["features"])
+            available = sorted(expected & present)
+            missing = sorted(expected - present)
+            total_expected = len(expected)
+            coverage = (
+                100.0 if total_expected == 0 else 100.0 * len(available) / total_expected
+            )
+            profiles.append(
+                {
+                    "name": name,
+                    "description": meta["description"],
+                    "coverage_percent": round(coverage, 1),
+                    "available": available,
+                    "missing": missing,
+                    "total_expected": total_expected,
+                    "total_available": len(available),
+                }
+            )
+        return {"profiles": profiles}
