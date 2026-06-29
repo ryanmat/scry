@@ -24,15 +24,6 @@ Land this table as Parquet or CSV. Partitioning by time (`year=/month=/day=/hour
 - `s3://bucket/metrics/**/*.parquet` (S3, MinIO, Ceph)
 - `gs://bucket/...` (GCS), `az://container/...` (Azure Data Lake)
 
-## HttpIngest API contract (optional adapter)
+## LogicMonitor (optional adapter)
 
-The `logicmonitor` extra reads from an HttpIngest-compatible service over the endpoints below. Implement them and any backend can feed Scry the same way:
-
-| endpoint | returns |
-|---|---|
-| `GET /api/ml/training-data` | `{ "data": [ {resource_hash or resource_id, metric_name, timestamp, value, attributes} ], "meta": {"total": N} }` |
-| `GET /api/ml/inventory` | `{ "resources", "metrics", "time_range" }` |
-| `GET /api/ml/profile-coverage` | per-profile coverage percentages |
-| `GET /api/ml/quality` | freshness and gap metrics |
-
-Records are normalized by `normalize_record`: `resource_hash` maps to `resource_id`, a JSON `attributes` blob supplies `host_name`/`datasource_instance`, and the value resolves across `value` / `value_double` / `value_int`.
+The `scry[logicmonitor]` extra ships an exporter (`scripts/export_logicmonitor.py`) that writes this canonical table directly from the LogicMonitor REST API; see [ingestion.md](ingestion.md). No intermediate service is required. A legacy HttpIngest adapter that reads from an external `/api/ml/*` service also exists for backward compatibility and is slated for removal.

@@ -17,7 +17,7 @@ LogicMonitor is one supported adapter, not the anchor. The default path reads Pa
 <tr><td><b>The X-DEC model</b></td><td>A dual-encoder temporal VAE plus deep embedded clustering, pure PyTorch, no cloud dependencies. Trains on your own windowed metrics from scratch.</td></tr>
 <tr><td><b>Five operational states</b></td><td>Every resource is sorted into NORMAL, PRE_SCALE, PRE_FAILURE, ACTIVE_DEGRADATION, or ANOMALY, each mapped to a recommended action and priority.</td></tr>
 <tr><td><b>Forecasting</b></td><td>An optional Chronos layer (<code>scryml[forecast]</code>) projects where each metric is headed across multiple horizons, kept behind an extra so the core stays offline-capable.</td></tr>
-<tr><td><b>Data-source agnostic</b></td><td>Read Parquet or CSV from local disk or object storage (S3, GCS, ADLS, MinIO) through DuckDB. The LogicMonitor adapter lives behind <code>scryml[logicmonitor]</code>.</td></tr>
+<tr><td><b>Data-source agnostic</b></td><td>Read Parquet or CSV from local disk or object storage (S3, GCS, ADLS, MinIO) through DuckDB. A LogicMonitor REST exporter lives behind <code>scryml[logicmonitor]</code>.</td></tr>
 <tr><td><b>A small HTTP service</b></td><td>FastAPI endpoints for prediction, forecasting, drift, anomaly, and accuracy: <code>/predict</code>, <code>/predict/lookup</code>, <code>/forecast</code>, <code>/drift</code>, <code>/anomaly</code>, <code>/accuracy</code>.</td></tr>
 <tr><td><b>Bring your own data</b></td><td>One canonical schema: resource, metric, timestamp, value, plus optional host and datasource fields. Drop your metrics into that table and train. No real telemetry or weights are included.</td></tr>
 </table>
@@ -64,8 +64,9 @@ Full walkthrough, including a `/predict` call: [examples/quickstart.md](examples
 ## Documentation
 
 - [Architecture](docs/architecture.md): the model, the data seam, and how the pieces fit together.
-- [Data contract](docs/data-contract.md): the canonical metric schema and the ingestion API.
-- [Ingestion](docs/ingestion.md): object storage and the LogicMonitor adapter.
+- [Data contract](docs/data-contract.md): the canonical metric schema.
+- [Ingestion](docs/ingestion.md): object storage and the LogicMonitor REST exporter.
+- [Roadmap](docs/roadmap.md): where Scry is headed.
 - [Training](docs/training.md): training locally or on your own orchestrator.
 
 Built with `uv`, `ruff`, and `pytest` on Python 3.10 and up.
