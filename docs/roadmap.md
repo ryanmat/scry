@@ -10,7 +10,6 @@ Scry is bring-your-own-data: land metrics in the [canonical schema](data-contrac
 
 ## Planned
 
-- A LogicMonitor Data Publisher (OTLP) normalizer and ingestion-route documentation.
 - Optional purely-numerical profiles, so a categorical feature is not required.
 - Profile reconciliation to live source metric names.
 - GPU/cloud training for production models, including a cluster-count sweep and longer history.

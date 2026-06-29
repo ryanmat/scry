@@ -24,7 +24,7 @@ Land this table as Parquet or CSV. Partitioning by time (`year=/month=/day=/hour
 - `s3://bucket/metrics/**/*.parquet` (S3, MinIO, Ceph)
 - `gs://bucket/...` (GCS), `az://container/...` (Azure Data Lake)
 
-## LogicMonitor (optional adapter)
+## LogicMonitor (optional)
 
 The `scry[logicmonitor]` extra ships an exporter (`scripts/export_logicmonitor.py`) that writes this canonical table directly from the LogicMonitor REST API; see [ingestion.md](ingestion.md). No intermediate service is required.
 
