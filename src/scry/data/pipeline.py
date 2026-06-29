@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -24,39 +24,22 @@ from scry.data.feature_engineering import (
 from scry.data.fetcher import DataFetcher
 from scry.utils.config import ScryConfig
 
-if TYPE_CHECKING:
-    from scry.data.sources.http_ingest import HttpIngestClient
-
 
 class XDECFeaturePipeline:
     """End-to-end feature pipeline for the X-DEC model.
 
-    Builds windowed training tensors from any DataFetcher. Use the
-    from_http_client() factory for the HttpIngest adapter, or construct a
-    pipeline directly from a DataFetcher over object storage.
+    Builds windowed training tensors from a DataFetcher over object storage.
     """
 
     def __init__(self, fetcher: DataFetcher, config: ScryConfig) -> None:
         """Initialize the pipeline.
 
         Args:
-            fetcher: DataFetcher instance (HTTP backed).
+            fetcher: DataFetcher instance.
             config: Scry configuration.
         """
         self._config = config
         self._fetcher = fetcher
-
-    @classmethod
-    def from_http_client(
-        cls, client: HttpIngestClient, config: ScryConfig
-    ) -> XDECFeaturePipeline:
-        """Create pipeline with HTTP data source (HttpIngest ML API).
-
-        Args:
-            client: Connected HttpIngestClient instance.
-            config: Scry configuration.
-        """
-        return cls(DataFetcher.from_http_client(client), config)
 
     async def extract(
         self,
@@ -69,7 +52,7 @@ class XDECFeaturePipeline:
         Args:
             start_time: Start of time range.
             end_time: End of time range.
-            profile: Feature profile for filtering (HTTP mode only).
+            profile: Feature profile for filtering.
 
         Returns:
             DataFrame with raw metrics in long format.

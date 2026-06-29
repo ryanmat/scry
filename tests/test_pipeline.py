@@ -254,59 +254,47 @@ class TestXDECFeaturePipelineAsync:
     """Async tests for XDECFeaturePipeline."""
 
     @pytest.fixture
-    def mock_client(self) -> MagicMock:
-        """Create a mock HttpIngestClient."""
-        client = MagicMock()
-        client.get_training_data_time_chunked = AsyncMock(return_value=[])
-        client.health_check = AsyncMock(return_value={"status": "healthy"})
-        return client
-
-    @pytest.fixture
     def mock_config(self) -> MagicMock:
         """Create a mock configuration."""
         config = MagicMock()
         config.sequence_length = 30
+        config.window_step = 10
         return config
 
-    async def test_extract_calls_fetcher(
-        self, mock_client: MagicMock, mock_config: MagicMock
-    ) -> None:
-        """extract should call DataFetcher with correct time range."""
+    async def test_extract_passes_range_to_fetcher(self, mock_config: MagicMock) -> None:
+        """extract should pass the time range and profile through to the fetcher."""
         from scry.data.pipeline import XDECFeaturePipeline
 
-        pipeline = XDECFeaturePipeline.from_http_client(mock_client, mock_config)
+        fetcher = MagicMock()
+        fetcher.get_metrics_dataframe = AsyncMock(return_value=pd.DataFrame())
+        pipeline = XDECFeaturePipeline(fetcher, mock_config)
 
         start = datetime(2024, 12, 1, tzinfo=timezone.utc)
         end = datetime(2024, 12, 2, tzinfo=timezone.utc)
 
         await pipeline.extract(start, end, profile="collector")
 
-        # Should have called get_training_data_paginated
-        mock_client.get_training_data_time_chunked.assert_called()
+        fetcher.get_metrics_dataframe.assert_awaited_once_with(start, end, profile="collector")
 
-    async def test_run_returns_transformed_data(
-        self, mock_client: MagicMock, mock_config: MagicMock
-    ) -> None:
-        """run should return transformed data dict."""
+    async def test_run_returns_transformed_data(self, mock_config: MagicMock) -> None:
+        """run should extract from the fetcher and return a transformed data dict."""
         from scry.data.pipeline import XDECFeaturePipeline
 
-        # Setup mock with sample data
-        records = []
-        for minute in range(60):
-            timestamp = f"2024-12-01T10:{minute:02d}:00+00:00"
-            records.append(
-                {
-                    "resource_hash": "r1",
-                    "metric_name": "cpuUsageNanoCores",
-                    "timestamp": timestamp,
-                    "value": 50.0,
-                    "datasource_name": "Kubernetes_KSM_Pods",
-                    "attributes": '{"host_name": "pod-1", "dataSourceInstanceName": "container"}',
-                }
-            )
-        mock_client.get_training_data_time_chunked.return_value = records
-
-        pipeline = XDECFeaturePipeline.from_http_client(mock_client, mock_config)
+        records = [
+            {
+                "resource_id": "r1",
+                "host_name": "pod-1",
+                "metric_name": "cpuUsageNanoCores",
+                "timestamp": datetime(2024, 12, 1, 10, minute, tzinfo=timezone.utc),
+                "value": 50.0,
+                "datasource_instance": "container",
+                "datasource_name": "Kubernetes_KSM_Pods",
+            }
+            for minute in range(60)
+        ]
+        fetcher = MagicMock()
+        fetcher.get_metrics_dataframe = AsyncMock(return_value=pd.DataFrame(records))
+        pipeline = XDECFeaturePipeline(fetcher, mock_config)
 
         start = datetime(2024, 12, 1, tzinfo=timezone.utc)
         end = datetime(2024, 12, 2, tzinfo=timezone.utc)

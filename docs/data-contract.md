@@ -26,7 +26,7 @@ Land this table as Parquet or CSV. Partitioning by time (`year=/month=/day=/hour
 
 ## LogicMonitor (optional adapter)
 
-The `scry[logicmonitor]` extra ships an exporter (`scripts/export_logicmonitor.py`) that writes this canonical table directly from the LogicMonitor REST API; see [ingestion.md](ingestion.md). No intermediate service is required. A legacy HttpIngest adapter that reads from an external `/api/ml/*` service also exists for backward compatibility and is slated for removal.
+The `scry[logicmonitor]` extra ships an exporter (`scripts/export_logicmonitor.py`) that writes this canonical table directly from the LogicMonitor REST API; see [ingestion.md](ingestion.md). No intermediate service is required.
 
 ## Feature schema and alignment
 

@@ -1,5 +1,5 @@
 # Description: Data fetcher: turns a DataSource into pandas DataFrames for feature work.
-# Description: Factory methods select the backend (object store, local files, HttpIngest).
+# Description: Factory methods select the backend (object store, local files).
 
 """Data fetcher service.
 
@@ -59,16 +59,6 @@ class DataFetcher:
         """Create a fetcher for local Parquet/CSV files (a thin alias for object store)."""
         return cls.from_object_store(path, data_format=data_format)
 
-    @classmethod
-    def from_http_client(cls, client: Any) -> "DataFetcher":
-        """Create a fetcher backed by an HttpIngest client (the LogicMonitor adapter).
-
-        Requires the ``logicmonitor`` extra (httpx).
-        """
-        from scry.data.sources.http_ingest import HttpDataSource
-
-        return cls(HttpDataSource(client))
-
     async def get_metrics_dataframe(
         self,
         start_time: datetime,
@@ -113,7 +103,7 @@ class DataFetcher:
     async def check_profile_coverage(self, min_coverage: float = 80.0) -> dict[str, Any]:
         """Check feature-profile coverage before training.
 
-        Only supported by sources that expose coverage (the HttpIngest adapter).
+        Supported by sources that expose coverage (the object store).
 
         Args:
             min_coverage: Minimum acceptable coverage percentage.
@@ -123,7 +113,7 @@ class DataFetcher:
         """
         if not hasattr(self._source, "get_profile_coverage"):
             raise NotImplementedError(
-                "profile coverage is only available for the HttpIngest source"
+                "the configured data source does not support profile coverage"
             )
 
         coverage = await self._source.get_profile_coverage()
@@ -147,7 +137,7 @@ class DataFetcher:
     ) -> dict[str, Any]:
         """Check data quality before training.
 
-        Only supported by sources that expose quality metrics (the HttpIngest adapter).
+        Supported by sources that expose quality metrics (the object store).
 
         Args:
             profile: Optional profile to check.
@@ -159,7 +149,7 @@ class DataFetcher:
         """
         if not hasattr(self._source, "get_quality"):
             raise NotImplementedError(
-                "data quality checks are only available for the HttpIngest source"
+                "the configured data source does not support data quality checks"
             )
 
         quality = await self._source.get_quality(profile=profile)

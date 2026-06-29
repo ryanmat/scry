@@ -5,7 +5,7 @@ Scry reads metrics, learns what healthy looks like, assigns each resource an ope
 ## Components
 
 - `src/scry/model/` - X-DEC: two encoders (one for numerical time series, one for categorical) feed a variational autoencoder; deep embedded clustering groups the latent space into five operational states. Includes drift detection and an optional Chronos forecasting layer. Pure PyTorch, no cloud.
-- `src/scry/data/` - feature engineering and the windowing pipeline, plus the data-source seam in `data/sources/`: the `DataSource` interface (`base.py`), the object-store reader (`object_store.py`), the LogicMonitor REST exporter (`lm_export.py`), and a legacy HttpIngest adapter (`http_ingest.py`).
+- `src/scry/data/` - feature engineering and the windowing pipeline, plus the data-source seam in `data/sources/`: the `DataSource` interface (`base.py`), the object-store reader (`object_store.py`), and the LogicMonitor REST exporter (`lm_export.py`).
 - `src/scry/api/` - a FastAPI service: `/predict`, `/forecast`, `/drift`, `/anomaly`, plus `/health` and `/clusters`.
 - `config/features.yaml` - per-domain feature profiles. `config/config.yaml` - model and training defaults.
 

@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 # Description: Script to validate data pipeline connectivity and data availability.
-# Description: Reports metrics, resources, and profile coverage for an object store or HttpIngest.
+# Description: Reports metrics, resources, coverage, and quality over an object store.
 
 """Validate data pipeline for Scry.
 
 Usage:
-    # Object store (the default path): a URI/glob or SCRY_DATA_URI
     python scripts/validate_data.py --data "data/metrics/**/*.parquet" --profile collector
     SCRY_DATA_URI=s3://bucket/metrics/**/*.parquet python scripts/validate_data.py
-
-    # LogicMonitor HttpIngest adapter (legacy; needs the 'logicmonitor' extra)
-    python scripts/validate_data.py --httpingest-url https://ingest.example.com --profile collector
 """
 
 import argparse
@@ -158,12 +154,8 @@ async def main(
     verbose: bool,
     profile: str,
     data_uri: str | None,
-    httpingest_url: str | None,
 ) -> int:
-    """Validate data pipeline connectivity and data availability.
-
-    Selects the object store when ``data_uri`` is set (the default path), else the
-    legacy HttpIngest adapter when ``httpingest_url`` is set.
+    """Validate data pipeline connectivity and data availability over the object store.
 
     Returns:
         Exit code (0 for success, 1 for failure).
@@ -172,29 +164,14 @@ async def main(
     print("Scry - Data Pipeline Validation")
     print("=" * 60)
 
-    try:
-        if data_uri:
-            print(f"Reading object store at {data_uri}...")
-            fetcher = DataFetcher.from_object_store(data_uri)
-            await _report(fetcher, hours, verbose, profile)
-        elif httpingest_url:
-            from scry.data.sources.http_ingest import HttpIngestClient
+    if not data_uri:
+        print("[ERROR] No data source. Set --data or SCRY_DATA_URI to an object-store URI.")
+        return 1
 
-            print(f"Connecting to HttpIngest at {httpingest_url}...")
-            async with HttpIngestClient(base_url=httpingest_url) as client:
-                health = await client.health_check()
-                print(
-                    f"[OK] HttpIngest {health.get('version', 'unknown')} "
-                    f"- {health.get('status', 'unknown')}"
-                )
-                fetcher = DataFetcher.from_http_client(client)
-                await _report(fetcher, hours, verbose, profile)
-        else:
-            print(
-                "[ERROR] No data source. Set --data / SCRY_DATA_URI for an object "
-                "store, or --httpingest-url for the HttpIngest adapter."
-            )
-            return 1
+    try:
+        print(f"Reading object store at {data_uri}...")
+        fetcher = DataFetcher.from_object_store(data_uri)
+        await _report(fetcher, hours, verbose, profile)
     except Exception as e:
         print(f"[ERROR] Pipeline validation failed: {e}")
         import traceback
@@ -233,12 +210,6 @@ def parse_args() -> argparse.Namespace:
         help="Feature profile to validate (default: collector)",
     )
     parser.add_argument(
-        "--httpingest-url",
-        type=str,
-        default=None,
-        help="HttpIngest API URL (legacy). Default: HTTPINGEST_URL env var when set.",
-    )
-    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -250,8 +221,5 @@ def parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = parse_args()
     data_uri = _data_uri(args.data)
-    httpingest_url = args.httpingest_url or os.environ.get("HTTPINGEST_URL")
-    exit_code = asyncio.run(
-        main(args.hours, args.verbose, args.profile, data_uri, httpingest_url)
-    )
+    exit_code = asyncio.run(main(args.hours, args.verbose, args.profile, data_uri))
     sys.exit(exit_code)

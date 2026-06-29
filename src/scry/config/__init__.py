@@ -7,7 +7,6 @@ from scry.config.auto_discovery import (
     classify_metric_type,
     discover_features_from_metrics,
     discover_from_dataframe,
-    discover_from_http,
 )
 from scry.config.loader import (
     FeatureConfig,
@@ -26,5 +25,4 @@ __all__ = [
     "classify_metric_type",
     "discover_features_from_metrics",
     "discover_from_dataframe",
-    "discover_from_http",
 ]

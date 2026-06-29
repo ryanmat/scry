@@ -66,9 +66,9 @@ def temp_model_path():
 def test_client(temp_model_path):
     """Create a test client with a loaded model.
 
-    Pins HTTPINGEST_URL to a fixed address AND resets the Config singleton
-    so the new env actually takes effect. Without the reset, whichever test
-    triggered the first get_config() call locks in that value for the rest
+    Pins SCRY_DATA_URI to a fixed object-store URI AND resets the Config
+    singleton so the new env actually takes effect. Without the reset, whichever
+    test triggered the first get_config() call locks in that value for the rest
     of the suite (the developer's local .env or whatever pytest collected
     first), and the datasource descriptor assertions become non-hermetic.
     """
@@ -76,7 +76,7 @@ def test_client(temp_model_path):
 
     with patch.dict(
         "os.environ",
-        {"MODEL_PATH": str(temp_model_path), "HTTPINGEST_URL": "http://127.0.0.1:1"},
+        {"MODEL_PATH": str(temp_model_path), "SCRY_DATA_URI": "data/metrics/**/*.parquet"},
     ):
         reset_config()
         from scry.api.main import create_app
@@ -139,12 +139,12 @@ class TestHealthDetailed:
         """The datasource descriptor is reported and non-empty."""
         data = test_client.get("/health/detailed").json()
         assert data["datasource"] is not None
-        assert data["datasource"].startswith("httpingest:")
+        assert data["datasource"].startswith("object-store:")
 
     def test_datasource_reflects_config(self, test_client):
-        """The datasource descriptor reflects the configured HttpIngest URL."""
+        """The datasource descriptor reflects the configured object-store URI."""
         data = test_client.get("/health/detailed").json()
-        assert data["datasource"] == "httpingest: http://127.0.0.1:1"
+        assert data["datasource"] == "object-store: data/metrics/**/*.parquet"
 
     def test_chronos_not_loaded_initially(self, test_client):
         """Chronos model is lazy-loaded, not loaded at startup."""

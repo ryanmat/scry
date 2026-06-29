@@ -26,25 +26,25 @@ class TestConfig:
         assert config.latent_dim == 8
         assert config.batch_size == 64
 
-    def test_config_has_default_httpingest_url(self) -> None:
-        """Config should default httpingest_url to localhost."""
+    def test_config_data_uri_defaults_to_none(self) -> None:
+        """Config should default data_uri to None (no object store configured)."""
         from scry.utils.config import Config
 
         config = Config(_env_file=None)
 
-        assert config.httpingest_url == "http://localhost:8000"
+        assert config.data_uri is None
 
-    def test_config_reads_httpingest_from_environment(self) -> None:
-        """Config should read HttpIngest URL from environment."""
+    def test_config_reads_data_uri_from_environment(self) -> None:
+        """Config should read the object-store URI from SCRY_DATA_URI."""
         from scry.utils.config import Config
 
         env = {
-            "HTTPINGEST_URL": "https://ingest.example.com",
+            "SCRY_DATA_URI": "s3://bucket/metrics/**/*.parquet",
         }
         with patch.dict(os.environ, env, clear=False):
             config = Config()
 
-        assert config.httpingest_url == "https://ingest.example.com"
+        assert config.data_uri == "s3://bucket/metrics/**/*.parquet"
 
     def test_config_environment_overrides_defaults(self) -> None:
         """Environment variables should override default values."""
@@ -133,15 +133,14 @@ class TestConfigGracefulDegradation:
         from scry.utils.config import Config
 
         config = Config(_env_file=None)
-        assert config.httpingest_url == "http://localhost:8000"
+        assert config.data_uri is None
 
-    def test_config_no_azure_urls_in_defaults(self) -> None:
-        """Default config should not contain any Azure-specific URLs."""
+    def test_config_no_hardcoded_urls_in_defaults(self) -> None:
+        """Default config should not contain any hardcoded data-source URLs."""
         from scry.utils.config import Config
 
         config = Config(_env_file=None)
-        assert "azurecontainerapps" not in config.httpingest_url
-        assert "localhost" in config.httpingest_url
+        assert config.data_uri is None
 
     def test_config_ignores_unknown_env_vars(self) -> None:
         """Config should ignore unknown environment variables (extra='ignore')."""
@@ -150,7 +149,7 @@ class TestConfigGracefulDegradation:
         env = {"UNKNOWN_SCRY_VAR": "should_be_ignored"}
         with patch.dict(os.environ, env, clear=False):
             config = Config()
-        assert config.httpingest_url is not None
+        assert config.model_path == "models/xdec_model.pt"
 
     def test_config_model_path_has_relative_default(self) -> None:
         """MODEL_PATH should default to a relative path, not an absolute one."""

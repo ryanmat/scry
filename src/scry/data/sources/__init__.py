@@ -3,8 +3,8 @@
 
 """Data sources: the DataSource interface and concrete readers.
 
-The HttpIngest (LogicMonitor) adapter lives in ``http_ingest`` and is imported
-lazily by the fetcher factory so the ``logicmonitor`` extra (httpx) stays optional.
+The object-store reader lives in ``object_store``. The LogicMonitor REST exporter
+(an ingestion route that writes the canonical schema) lives in ``lm_export``.
 """
 
 from scry.data.sources.base import METRICS_COLUMNS, DataSource, normalize_record

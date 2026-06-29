@@ -123,48 +123,6 @@ def discover_features_from_metrics(
     )
 
 
-async def discover_from_http(
-    client: Any,
-    sample_size: int = 1000,
-) -> FeatureConfig:
-    """Discover feature configuration from HttpIngest ML API.
-
-    Fetches available metrics from the HttpIngest ML API and samples
-    values to classify each metric type.
-
-    Args:
-        client: HttpIngestClient instance (connected).
-        sample_size: Number of samples to use for classification.
-
-    Returns:
-        Dynamically created FeatureConfig.
-    """
-    # Get inventory of available metrics
-    inventory = await client.get_inventory()
-    metric_names = inventory.get("metrics", [])
-
-    logger.info("Found %d distinct metrics via HttpIngest", len(metric_names))
-
-    # Fetch a sample of training data to classify metrics
-    sample_data = await client.get_training_data(limit=sample_size)
-
-    # Group values by metric name
-    metrics_data: dict[str, list[float]] = {}
-    for record in sample_data:
-        name = record.get("metric_name")
-        value = record.get("value")
-        if name and value is not None:
-            try:
-                float_val = float(value)
-                if name not in metrics_data:
-                    metrics_data[name] = []
-                metrics_data[name].append(float_val)
-            except (ValueError, TypeError):
-                pass
-
-    return discover_features_from_metrics(metrics_data)
-
-
 def discover_from_dataframe(
     df: Any,
     exclude_columns: list[str] | None = None,

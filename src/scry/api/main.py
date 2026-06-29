@@ -46,19 +46,11 @@ def _data_uri() -> str | None:
 
 
 def _datasource_descriptor() -> str | None:
-    """Describe the configured data source for diagnostics, or None if unconfigured.
-
-    Object storage (SCRY_DATA_URI) is the default. The HttpIngest adapter is used
-    only when the ``logicmonitor`` extra is installed.
-    """
+    """Describe the configured data source for diagnostics, or None if unconfigured."""
     uri = _data_uri()
     if uri:
         return f"object-store: {uri}"
-    try:
-        import scry.data.sources.http_ingest  # noqa: F401
-    except ImportError:
-        return None
-    return f"httpingest: {get_config().httpingest_url}"
+    return None
 
 
 def _resolve_rows(df: Any, resource_id: str) -> Any:
@@ -90,33 +82,26 @@ def _resolve_rows(df: Any, resource_id: str) -> Any:
 async def _resource_metrics(
     resource_id: str, lookback_days: int = 30, profile: str | None = None
 ) -> Any:
-    """Fetch recent metrics for a resource through the configured data source.
+    """Fetch recent metrics for a resource from the configured object store.
 
     Returns a canonical-schema DataFrame filtered to the resource, or None when no
-    data source is configured. Object storage is the default; the HttpIngest
-    adapter is used only when the ``logicmonitor`` extra is installed.
+    object store is configured (``SCRY_DATA_URI``).
 
     ``profile`` selects which metric names to pull; when None it falls back to the
     ``SCRY_PROFILE`` env var (and then the features.yaml default).
     """
-    from scry.data import DataFetcher
-
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=lookback_days)
     profile_name = profile if profile is not None else os.environ.get("SCRY_PROFILE")
 
     uri = _data_uri()
-    if uri:
-        fetcher = DataFetcher.from_object_store(uri)
-        df = await fetcher.get_metrics_dataframe(start, end, profile_name)
-    else:
-        try:
-            from scry.data import HttpIngestClient
-        except ImportError:
-            return None
-        async with HttpIngestClient(base_url=get_config().httpingest_url) as client:
-            fetcher = DataFetcher.from_http_client(client)
-            df = await fetcher.get_metrics_dataframe(start, end, profile_name)
+    if not uri:
+        return None
+
+    from scry.data import DataFetcher
+
+    fetcher = DataFetcher.from_object_store(uri)
+    df = await fetcher.get_metrics_dataframe(start, end, profile_name)
 
     if df.empty:
         return df
@@ -273,10 +258,9 @@ def create_app(model_path: str | None = None) -> FastAPI:
     async def predict_lookup(
         resource_id: str = Query(..., description="Resource id or hostname to look up"),
     ) -> PredictionResponse:
-        """Look up a resource's recent metrics through the configured data source and predict.
+        """Look up a resource's recent metrics from the configured object store and predict.
 
-        Object storage (SCRY_DATA_URI) is the default source; the HttpIngest
-        adapter is used when the ``logicmonitor`` extra is installed.
+        The object store is selected by ``SCRY_DATA_URI``.
 
         Raises:
             HTTPException: 503 if the model is not loaded or no source is configured,
@@ -302,10 +286,7 @@ def create_app(model_path: str | None = None) -> FastAPI:
             if df is None:
                 raise HTTPException(
                     status_code=503,
-                    detail=(
-                        "No data source configured. Set SCRY_DATA_URI, or install the "
-                        "'logicmonitor' extra and set HTTPINGEST_URL."
-                    ),
+                    detail="No data source configured. Set SCRY_DATA_URI to an object-store URI.",
                 )
             if df.empty:
                 raise HTTPException(

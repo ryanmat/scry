@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Description: CLI to extract windowed X-DEC training data from a data source.
-# Description: Reads metrics (object store or HttpIngest) and writes a .npz training file.
+# Description: Reads metrics from the object store and writes a .npz training file.
 
 """Extract training data for the X-DEC model.
 
@@ -10,9 +10,6 @@ Examples:
 
     # Remote object storage (S3 / GCS / Azure) via a URI
     python scripts/extract_features.py --data "s3://bucket/metrics/**/*.parquet" --start 7d
-
-    # LogicMonitor HttpIngest adapter (needs the 'logicmonitor' extra)
-    python scripts/extract_features.py --httpingest-url https://ingest.example.com --profile collector
 """
 
 import argparse
@@ -55,14 +52,6 @@ async def _extract(args: argparse.Namespace) -> tuple[XDECFeaturePipeline, dict]
     if args.profile:
         set_active_profile(args.profile)
 
-    if args.httpingest_url:
-        from scry.data.sources.http_ingest import HttpIngestClient
-
-        async with HttpIngestClient(base_url=args.httpingest_url) as client:
-            pipeline = XDECFeaturePipeline.from_http_client(client, config)
-            raw = await pipeline.extract(start, end, profile=args.profile)
-            return pipeline, pipeline.transform(raw)
-
     fetcher = DataFetcher.from_object_store(args.data, data_format=args.format)
     pipeline = XDECFeaturePipeline(fetcher, config)
     raw = await pipeline.extract(start, end, profile=args.profile)
@@ -75,9 +64,6 @@ def main() -> int:
     )
     src = parser.add_argument_group("data source")
     src.add_argument("--data", help="Object-store URI or local path/glob (Parquet or CSV).")
-    src.add_argument(
-        "--httpingest-url", help="HttpIngest ML API base URL (LogicMonitor adapter)."
-    )
     src.add_argument(
         "--format", choices=["parquet", "csv"], help="Override the inferred file format."
     )
@@ -93,8 +79,8 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if not args.data and not args.httpingest_url:
-        parser.error("provide --data <uri-or-path> or --httpingest-url")
+    if not args.data:
+        parser.error("provide --data <uri-or-path>")
 
     pipeline, data = asyncio.run(_extract(args))
 

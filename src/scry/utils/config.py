@@ -1,5 +1,5 @@
 # Description: Configuration management using Pydantic Settings.
-# Description: Loads config from environment variables for HttpIngest and model settings.
+# Description: Loads config from environment variables for the data source and model settings.
 
 """Configuration management for Scry."""
 
@@ -11,8 +11,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Config(BaseSettings):
     """Configuration loaded from environment variables.
 
-    The default data source is object storage (SCRY_DATA_URI); the HttpIngest
-    adapter (HTTPINGEST_URL) is used when the 'logicmonitor' extra is installed.
+    The data source is an object store selected by ``SCRY_DATA_URI`` (the scheme
+    picks the backend: file/s3/gs/az).
     """
 
     model_config = SettingsConfigDict(
@@ -21,18 +21,11 @@ class Config(BaseSettings):
         extra="ignore",
     )
 
-    # Object-store data source (default). Scheme selects the backend (file/s3/gs/az).
+    # Object-store data source. Scheme selects the backend (file/s3/gs/az).
     data_uri: str | None = Field(
         None,
         alias="SCRY_DATA_URI",
-        description="Object-store URI for the default data source",
-    )
-
-    # HttpIngest adapter (optional, 'logicmonitor' extra)
-    httpingest_url: str = Field(
-        "http://localhost:8000",
-        alias="HTTPINGEST_URL",
-        description="HttpIngest API base URL for ML endpoints",
+        description="Object-store URI for the data source",
     )
 
     # Model configuration

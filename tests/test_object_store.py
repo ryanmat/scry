@@ -364,3 +364,26 @@ async def test_fetcher_check_data_quality_does_not_raise(
     assert "summary" in result
     assert "warnings" in result
     assert "ready" in result
+
+
+async def test_fetch_metrics_profile_filter(features_yaml: Path, tmp_path: Path) -> None:
+    """get_metrics_dataframe restricts the rows to the profile's metric names."""
+    base = pd.Timestamp("2026-06-15T00:00:00", tz="UTC")
+    rows = [
+        {
+            "resource_id": "r1",
+            "metric_name": name,
+            "timestamp": base + pd.Timedelta(minutes=i),
+            "value": 1.0,
+        }
+        for i, name in enumerate(["A", "B", "OTHER"])  # OTHER is outside p_present {A, B, D}
+    ]
+    path = tmp_path / "pf_fetch.parquet"
+    _write(path, pd.DataFrame(rows))
+
+    fetcher = DataFetcher.from_object_store(str(path))
+    start = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    end = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    df = await fetcher.get_metrics_dataframe(start, end, profile="p_present")
+
+    assert set(df["metric_name"]) == {"A", "B"}  # OTHER excluded; D absent from data

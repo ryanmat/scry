@@ -1,5 +1,5 @@
 # Description: Feature configuration for infrastructure domains.
-# Description: Single source of truth for metric names across HttpIngest and Scry.
+# Description: Single source of truth for metric names for Scry feature profiles.
 
 # Default profile to use when domain is not specified
 default_profile: kubernetes

@@ -1,13 +1,12 @@
 # Description: Data layer: sources, fetcher, feature engineering, and windowing pipeline.
-# Description: Torch-free members import eagerly; torch-dependent and httpx members lazily.
+# Description: Torch-free members import eagerly; torch-dependent members import lazily.
 
 """Data layer for Scry.
 
 Torch-free members (DataFetcher, DataSource, ObjectStoreSource) import eagerly.
 Torch-dependent members (feature engineering, XDECFeaturePipeline) import lazily
 via PEP 562 ``__getattr__`` so torch-free consumers can use this package without
-pulling torch. The HttpIngest adapter also imports lazily so the ``logicmonitor``
-extra (httpx) stays optional. Every name in ``__all__`` still resolves.
+pulling torch. Every name in ``__all__`` still resolves.
 """
 
 from scry.data.fetcher import DataFetcher
@@ -26,8 +25,6 @@ _LAZY_EXPORTS = {
     "get_categorical_features": "scry.data.feature_engineering",
     "get_numerical_features": "scry.data.feature_engineering",
     "set_active_profile": "scry.data.feature_engineering",
-    "HttpIngestClient": "scry.data.sources.http_ingest",
-    "HttpDataSource": "scry.data.sources.http_ingest",
 }
 
 
@@ -60,6 +57,4 @@ __all__ = [
     "get_categorical_features",
     "get_numerical_features",
     "set_active_profile",
-    "HttpIngestClient",
-    "HttpDataSource",
 ]
