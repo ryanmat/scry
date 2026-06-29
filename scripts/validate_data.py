@@ -66,6 +66,34 @@ async def _report(fetcher: DataFetcher, hours: int, verbose: bool, profile: str)
     except Exception as e:
         print(f"  [WARNING] Could not check coverage: {e}")
 
+    # Data quality (freshness and gaps)
+    print()
+    print("Data Quality:")
+    print("-" * 40)
+    try:
+        quality = await fetcher.check_data_quality(profile=profile)
+        s = quality.get("summary", {})
+        print(f"  Freshness score: {s.get('freshness_score', 0):.1f}%")
+        print(f"  Gap score:       {s.get('gap_score', 0):.1f}%")
+        lag = s.get("lag_seconds")
+        if lag is not None:
+            print(f"  Latest sample:   {lag / 3600:.1f} hours behind now")
+        for w in quality.get("warnings", []):
+            print(f"  [!] {w}")
+        if verbose:
+            for f in quality.get("freshness", [])[:5]:
+                print(
+                    f"       stale: {f['resource_id']}/{f['metric_name']} "
+                    f"({f['intervals_behind']:.0f} intervals behind)"
+                )
+            for g in quality.get("gaps", [])[:5]:
+                print(
+                    f"       gappy: {g['resource_id']}/{g['metric_name']} "
+                    f"({g['missing_pct']:.0f}% missing)"
+                )
+    except Exception as e:
+        print(f"  [WARNING] Could not check quality: {e}")
+
     # Available metrics
     print()
     print("Available Metrics:")

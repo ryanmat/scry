@@ -13,7 +13,7 @@ read credentials from the standard environment variables for that cloud.
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +82,11 @@ def _load_all_profiles() -> dict[str, dict[str, Any]]:
             + list(p.get("categorical_features", [])),
         }
     return out
+
+
+# A series is "live" when its last sample is within this many inferred intervals
+# of the reference time.
+_FRESH_K = 2
 
 
 class ObjectStoreSource(DataSource):
@@ -295,3 +300,183 @@ class ObjectStoreSource(DataSource):
                 }
             )
         return {"profiles": profiles}
+
+    async def get_quality(
+        self,
+        profile: str | None = None,
+        reference_time: datetime | None = None,
+        lookback_hours: int | None = None,
+        worst_n: int = 20,
+    ) -> dict[str, Any]:
+        """Report freshness and gap quality per ``(resource, metric)`` series.
+
+        The sample interval is inferred per series as the median positive gap
+        between consecutive timestamps, so no cadence is assumed. ``gap_score`` is
+        the mean per-series point density (observed over expected points); sparse
+        series are listed in ``gaps``. ``freshness`` is measured against
+        ``reference_time``, which defaults to the dataset's latest timestamp (not
+        wall-clock now) so a static capture reads fresh; a series is "live" when
+        its last sample is within ``_FRESH_K`` intervals of the reference, and
+        stale series are listed in ``freshness``. ``lag_seconds`` reports
+        wall-clock staleness separately. Single-point and constant-timestamp
+        series have no inferable interval and are excluded from scoring.
+
+        Args:
+            profile: Restrict to this profile's metric names when set.
+            reference_time: Freshness reference; defaults to the data's latest timestamp.
+            lookback_hours: Restrict analysis to the last N hours before the
+                reference; ``None`` (the default) assesses the full window.
+            worst_n: Cap on the number of series listed in ``freshness`` and ``gaps``.
+
+        Returns:
+            ``{"summary": {...}, "freshness": [...], "gaps": [...]}``.
+        """
+        names = _load_profile_metrics(profile) if profile else []
+        name_filter = " AND list_contains($names, metric_name)" if names else ""
+
+        conn = self._connect()
+        try:
+            # Pin UTC so TIMESTAMPTZ->TIMESTAMP casts (and lag vs wall-clock now)
+            # are computed in UTC regardless of the host timezone.
+            conn.execute("SET TimeZone='UTC';")
+
+            rid = self._resource_column(self._columns(conn))
+            rid_expr = rid if rid else "CAST(NULL AS VARCHAR)"
+
+            bounds_params: dict[str, Any] = {"ref": reference_time}
+            if names:
+                bounds_params["names"] = names
+            bounds = conn.execute(
+                f"SELECT COALESCE($ref::TIMESTAMP, MAX(timestamp)::TIMESTAMP) AS ref_ts, "
+                f"MAX(timestamp)::TIMESTAMP AS data_max_ts "
+                f"FROM {self._read_expr()} "
+                f"WHERE timestamp IS NOT NULL{name_filter}",
+                bounds_params,
+            ).fetchone()
+            ref_ts, data_max_ts = bounds[0], bounds[1]
+            if data_max_ts is None:
+                return {
+                    "summary": {
+                        "freshness_score": 0.0,
+                        "gap_score": 0.0,
+                        "lag_seconds": None,
+                        "total_series": 0,
+                        "series_analyzed": 0,
+                        "reference_time": None,
+                    },
+                    "freshness": [],
+                    "gaps": [],
+                }
+
+            q_params: dict[str, Any] = {"ref": ref_ts, "k": _FRESH_K}
+            lower_bound = ""
+            if lookback_hours is not None:
+                lower_bound = "AND ts > $ref::TIMESTAMP - ($lookback * INTERVAL '1 hour')"
+                q_params["lookback"] = lookback_hours
+            if names:
+                q_params["names"] = names
+
+            series_sql = f"""
+                WITH src AS (
+                    SELECT {rid_expr} AS resource_id, metric_name, timestamp::TIMESTAMP AS ts
+                    FROM {self._read_expr()}
+                    WHERE timestamp IS NOT NULL{name_filter}
+                ),
+                windowed AS (
+                    SELECT resource_id, metric_name, ts
+                    FROM src
+                    WHERE ts <= $ref::TIMESTAMP {lower_bound}
+                ),
+                deltas AS (
+                    SELECT resource_id, metric_name, ts,
+                        epoch(ts - LAG(ts) OVER (
+                            PARTITION BY resource_id, metric_name ORDER BY ts)) AS dsec
+                    FROM windowed
+                ),
+                series AS (
+                    SELECT resource_id, metric_name,
+                        COUNT(*) AS pts,
+                        MIN(ts) AS first_ts,
+                        MAX(ts) AS last_ts,
+                        quantile_cont(dsec, 0.5) FILTER (WHERE dsec > 0) AS interval_s,
+                        max(dsec) FILTER (WHERE dsec > 0) AS max_delta_s
+                    FROM deltas
+                    GROUP BY resource_id, metric_name
+                )
+                SELECT resource_id, metric_name, pts, last_ts, interval_s,
+                    CASE WHEN interval_s IS NULL THEN NULL
+                         ELSE least(1.0, pts::DOUBLE /
+                             (floor(epoch(last_ts - first_ts) / interval_s) + 1))
+                    END AS density,
+                    CASE WHEN interval_s IS NULL THEN NULL
+                         ELSE epoch($ref::TIMESTAMP - last_ts) / interval_s
+                    END AS intervals_behind,
+                    CASE WHEN interval_s IS NULL THEN NULL
+                         ELSE max_delta_s / interval_s
+                    END AS longest_gap_intervals,
+                    CASE WHEN interval_s IS NULL THEN NULL
+                         WHEN epoch($ref::TIMESTAMP - last_ts) / interval_s <= $k THEN TRUE
+                         ELSE FALSE
+                    END AS is_live
+                FROM series
+                ORDER BY resource_id, metric_name
+            """
+            df = conn.execute(series_sql, q_params).df()
+        finally:
+            conn.close()
+
+        total_series = len(df)
+        analyzed = df[df["interval_s"].notna()]
+        series_analyzed = len(analyzed)
+
+        if series_analyzed == 0:
+            freshness_score = 0.0
+            gap_score = 0.0
+        else:
+            gap_score = round(100.0 * float(analyzed["density"].mean()), 1)
+            freshness_score = round(
+                100.0 * float(analyzed["is_live"].astype(bool).mean()), 1
+            )
+
+        dead = (
+            analyzed[~analyzed["is_live"].astype(bool)]
+            .sort_values("intervals_behind", ascending=False)
+            .head(worst_n)
+        )
+        freshness = [
+            {
+                "resource_id": r["resource_id"],
+                "metric_name": r["metric_name"],
+                "last_timestamp": str(r["last_ts"]),
+                "intervals_behind": round(float(r["intervals_behind"]), 1),
+            }
+            for _, r in dead.iterrows()
+        ]
+
+        gappy = analyzed[analyzed["density"] < 1.0].sort_values("density").head(worst_n)
+        gaps = [
+            {
+                "resource_id": r["resource_id"],
+                "metric_name": r["metric_name"],
+                "density": round(float(r["density"]), 3),
+                "missing_pct": round(100.0 * (1.0 - float(r["density"])), 1),
+                "longest_gap_intervals": round(float(r["longest_gap_intervals"]), 1),
+            }
+            for _, r in gappy.iterrows()
+        ]
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        lag_seconds = round((now - data_max_ts).total_seconds(), 1)
+
+        return {
+            "summary": {
+                "freshness_score": freshness_score,
+                "gap_score": gap_score,
+                "lag_seconds": lag_seconds,
+                "total_series": total_series,
+                "series_analyzed": series_analyzed,
+                "reference_time": str(ref_ts),
+            },
+            "freshness": freshness,
+            "gaps": gaps,
+        }
