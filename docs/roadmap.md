@@ -7,10 +7,11 @@ Scry is bring-your-own-data: land metrics in the [canonical schema](data-contrac
 - **Ingestion routes as adapters, not runtime couplings.** Each source (LogicMonitor REST, LogicMonitor Data Publisher, your own ETL) lands canonical Parquet; Scry reads the object store. The LogicMonitor REST exporter ships today; see [ingestion.md](ingestion.md).
 - **Coverage and quality on canonical data.** Report which profile features are present or missing, and whether data is fresh and gap-free, before training or serving.
 - **Models carry their feature schema.** Persist the trained feature names, order, and profile, and align incoming data by name, so coverage differences between routes are a checked contract rather than a silent failure.
+- **Profiles can be purely numerical.** A categorical feature is not required; the X-DEC categorical branch is optional, so a numerical-only profile builds, trains, and serves.
+- **Validate by detection lead time.** Score a trained model against a labeled incident capture: per-window reconstruction error thresholded on healthy windows only, reporting how early the alarm fires before onset. See [incident-capture-runbook.md](incident-capture-runbook.md) and `scripts/validate_incident.py`.
 
 ## Planned
 
-- Optional purely-numerical profiles, so a categorical feature is not required.
 - Profile reconciliation to live source metric names.
 - GPU/cloud training for production models, including a cluster-count sweep and longer history.
 - An MCP server exposing prediction and forecasting as agent tools (the reserved `mcp` extra).

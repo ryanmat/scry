@@ -19,9 +19,10 @@ LogicMonitor is one supported source, not the anchor. The default path reads Par
 <tr><td><b>Forecasting</b></td><td>An optional Chronos layer (<code>scryml[forecast]</code>) projects where each metric is headed across multiple horizons, kept behind an extra so the core stays offline-capable.</td></tr>
 <tr><td><b>Data-source agnostic</b></td><td>Read Parquet or CSV from local disk or object storage (S3, GCS, ADLS, MinIO) through DuckDB. A LogicMonitor REST exporter lives behind <code>scryml[logicmonitor]</code>.</td></tr>
 <tr><td><b>Coverage and quality checks</b></td><td>Before training or serving, report which profile features are present or missing and whether the data is fresh and gap-free, computed directly over the object store with <code>scripts/validate_data.py</code>.</td></tr>
+<tr><td><b>Incident-validation harness</b></td><td>Score a trained model against a labeled incident capture: per-window reconstruction error thresholded on healthy data only, reporting detection lead time (how early the alarm fires before onset) with <code>scripts/validate_incident.py</code>.</td></tr>
 <tr><td><b>A small HTTP service</b></td><td>FastAPI endpoints for prediction, forecasting, drift, anomaly, and accuracy: <code>/predict</code>, <code>/predict/lookup</code>, <code>/forecast</code>, <code>/drift</code>, <code>/anomaly</code>, <code>/accuracy</code>.</td></tr>
 <tr><td><b>Schema-checked serving</b></td><td>Each trained model carries its feature schema (names, order, profile, normalization). The API aligns incoming metrics by name, so a coverage gap between sources is a checked contract, not a silent misalignment.</td></tr>
-<tr><td><b>Bring your own data</b></td><td>One canonical schema: resource, metric, timestamp, value, plus optional host and datasource fields. Drop your metrics into that table and train. No real telemetry or weights are included.</td></tr>
+<tr><td><b>Bring your own data</b></td><td>One canonical schema: resource, metric, timestamp, value, plus optional host and datasource fields. Drop your metrics into that table and train. Profiles may be purely numerical or mix numerical and categorical features. No real telemetry or weights are included.</td></tr>
 </table>
 
 ---
