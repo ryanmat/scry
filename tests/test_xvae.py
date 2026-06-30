@@ -104,7 +104,9 @@ class TestTemporalXVAE:
         xvae = TemporalXVAE()
 
         mu = torch.randn(4, 8)
-        logvar = torch.full((4, 8), -20.0)  # Very small variance
+        # Very small variance: std = exp(-15) ~ 3e-7, so z = mu + eps*std stays
+        # within tolerance of mu for any standard-normal eps, not just a lucky draw.
+        logvar = torch.full((4, 8), -30.0)
 
         z = xvae.reparameterize(mu, logvar)
 
