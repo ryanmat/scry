@@ -5,7 +5,8 @@
 default_profile: kubernetes
 
 # Domain profiles define the features for each infrastructure type.
-# All metric names are actual LogicMonitor metric names from production data.
+# Metric names in capture-verified profiles are confirmed present in real data;
+# profiles marked "unverified" carry illustrative names pending reconciliation.
 profiles:
   # LogicMonitor Collector Self-Monitoring
   # Datasources: LogicMonitor_Collector_*
@@ -74,7 +75,7 @@ profiles:
   # KubeVirt Virtual Machines (OpenShift Virtualization)
   # Datasources: kubevirt_*, OpenShift virtualized VMs via OTel
   kubevirt:
-    description: "KubeVirt virtual machines on OpenShift/ROSA clusters"
+    description: "KubeVirt virtual machines on OpenShift/ROSA clusters (unverified: illustrative metric names, not yet reconciled to a reference capture)"
     numerical_features:
       # VM CPU metrics
       - kubevirt_vmi_cpu_seconds
@@ -126,7 +127,7 @@ profiles:
   # Datasources: Kubernetes_KSM_*, Kubernetes_PingK8s, Kubernetes_Service, Argus_*
   # LogicMonitor metric names.
   kubernetes:
-    description: "Container orchestration workloads (K8s, ECS, Docker Swarm)"
+    description: "Container orchestration workloads (K8s, ECS, Docker Swarm) (unverified: illustrative metric names, not yet reconciled to a reference capture)"
     numerical_features:
       # CPU metrics (KSM_Pods)
       - cpuUsageNanoCores
@@ -200,7 +201,7 @@ profiles:
   # Cloud Compute (Windows/Linux VMs)
   # Datasources: Win*, Microsoft_Windows_*, Linux_OpenMetrics_*
   cloud_compute:
-    description: "Cloud virtual machines and compute instances"
+    description: "Cloud virtual machines and compute instances (unverified: illustrative metric names, not yet reconciled to a reference capture)"
     numerical_features:
       # CPU metrics
       - PercentProcessorTime
@@ -258,7 +259,7 @@ profiles:
   # Network Devices (SNMP + Streaming Telemetry)
   # Datasources: SNMP*, WinIf-*, Cisco_*, Cisco_Streaming_Telemetry_*
   network:
-    description: "Network devices, switches, routers, firewalls"
+    description: "Network devices, switches, routers, firewalls (unverified: illustrative metric names, not yet reconciled to a reference capture)"
     numerical_features:
       # Interface traffic (SNMP standard names)
       - BytesReceivedPerSec
@@ -313,7 +314,7 @@ profiles:
   # Database (SQL/NoSQL)
   # Placeholder - add actual LM database datasource metrics when available
   database:
-    description: "Database servers and managed database services"
+    description: "Database servers and managed database services (unverified: illustrative metric names, not yet reconciled to a reference capture)"
     numerical_features:
       # Connection metrics
       - ConnectionsEstablished
@@ -394,7 +395,7 @@ profiles:
   # Application/Service Monitoring (.NET, IIS, Java)
   # Datasources: .NetCLR*, Application Pools-, Microsoft_IIS_*
   application:
-    description: "Application performance monitoring metrics"
+    description: "Application performance monitoring metrics (unverified: illustrative metric names, not yet reconciled to a reference capture)"
     numerical_features:
       # Memory metrics
       - NumBytesinallHeaps
