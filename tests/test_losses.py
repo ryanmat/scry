@@ -55,6 +55,18 @@ class TestReconstructionLosses:
 
         assert loss_good < loss_bad
 
+    def test_categorical_loss_zero_for_zero_width(self) -> None:
+        """Categorical loss should be a zero scalar when the tensor is zero-width."""
+        from scry.model.losses import reconstruction_loss_categorical
+
+        x = torch.empty(8, 30, 0)
+        x_recon = torch.empty(8, 30, 0)
+
+        loss = reconstruction_loss_categorical(x, x_recon)
+
+        assert loss.shape == ()
+        assert loss.item() == 0.0
+
 
 class TestKLDivergence:
     """Tests for KL divergence loss functions."""
@@ -182,6 +194,28 @@ class TestXDECLoss:
         result["loss"].backward()
 
         assert x_num_recon.grad is not None
+
+    def test_loss_recon_cat_zero_for_numerical_only(self) -> None:
+        """recon_cat contributes zero when the categorical tensor is zero-width."""
+        from scry.model.losses import XDECLoss
+
+        loss_fn = XDECLoss(beta=1.0)
+
+        outputs = {
+            "x_num_recon": torch.randn(8, 30, 9),
+            "x_cat_recon": torch.empty(8, 30, 0),
+            "mu": torch.randn(8, 8),
+            "logvar": torch.randn(8, 8),
+        }
+        x_num = torch.randn(8, 30, 9)
+        x_cat = torch.empty(8, 30, 0)
+
+        result = loss_fn(outputs, x_num, x_cat)
+
+        assert result["recon_cat"].item() == 0.0
+        # Total equals the numerical reconstruction plus KL, with no cat term.
+        expected = result["recon_num"] + result["kl_vae"]
+        torch.testing.assert_close(result["loss"], expected)
 
 
 class TestClusterBalanceRegularization:

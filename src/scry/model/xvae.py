@@ -48,36 +48,45 @@ class TemporalXVAE(nn.Module):
         self.seq_len = seq_len
         self.latent_dim = latent_dim
 
-        # Dual encoders
+        # Numerical encoder is always present; the categorical branch is optional
+        # so purely-numerical profiles (num_categorical=0) build and train.
         self.numerical_encoder = NumericalEncoder(
             input_dim=num_numerical,
             hidden_dim=num_hidden,
         )
-        self.categorical_encoder = CategoricalEncoder(
-            input_dim=num_categorical,
-            hidden_dim=cat_hidden,
-        )
+        self.categorical_encoder: CategoricalEncoder | None = None
+        if num_categorical > 0:
+            self.categorical_encoder = CategoricalEncoder(
+                input_dim=num_categorical,
+                hidden_dim=cat_hidden,
+            )
 
-        # Merged encoder output dimension (bidirectional: 2 * hidden for each)
-        merged_dim = 2 * num_hidden + 2 * cat_hidden  # 128 + 64 = 192
+        # Merged encoder output dimension (bidirectional: 2 * hidden for each
+        # branch). The categorical term is present only when that branch exists.
+        merged_dim = 2 * num_hidden
+        if num_categorical > 0:
+            merged_dim += 2 * cat_hidden
 
         # VAE latent projections
         self.fc_mu = nn.Linear(merged_dim, latent_dim)
         self.fc_logvar = nn.Linear(merged_dim, latent_dim)
 
-        # Dual decoders
+        # Numerical decoder is always present; the categorical decoder mirrors
+        # the optional encoder branch.
         self.numerical_decoder = NumericalDecoder(
             latent_dim=latent_dim,
             output_dim=num_numerical,
             seq_len=seq_len,
             hidden_dim=num_hidden,
         )
-        self.categorical_decoder = CategoricalDecoder(
-            latent_dim=latent_dim,
-            output_dim=num_categorical,
-            seq_len=seq_len,
-            hidden_dim=cat_hidden,
-        )
+        self.categorical_decoder: CategoricalDecoder | None = None
+        if num_categorical > 0:
+            self.categorical_decoder = CategoricalDecoder(
+                latent_dim=latent_dim,
+                output_dim=num_categorical,
+                seq_len=seq_len,
+                hidden_dim=cat_hidden,
+            )
 
     def encode(
         self, x_num: torch.Tensor, x_cat: torch.Tensor
@@ -93,10 +102,14 @@ class TemporalXVAE(nn.Module):
         """
         # Encode each branch
         h_num = self.numerical_encoder(x_num)  # (batch, 2*num_hidden)
-        h_cat = self.categorical_encoder(x_cat)  # (batch, 2*cat_hidden)
 
-        # Merge representations
-        h_merged = torch.cat([h_num, h_cat], dim=1)  # (batch, merged_dim)
+        # Merge representations. With no categorical branch the merged
+        # representation is the numerical encoding alone (merged_dim == 2*num_hidden).
+        if self.categorical_encoder is not None:
+            h_cat = self.categorical_encoder(x_cat)  # (batch, 2*cat_hidden)
+            h_merged = torch.cat([h_num, h_cat], dim=1)  # (batch, merged_dim)
+        else:
+            h_merged = h_num  # (batch, merged_dim)
 
         # Project to latent parameters
         mu = self.fc_mu(h_merged)
@@ -133,7 +146,18 @@ class TemporalXVAE(nn.Module):
             Tuple of (x_num_recon, x_cat_recon).
         """
         x_num_recon = self.numerical_decoder(z)
-        x_cat_recon = self.categorical_decoder(z)
+        if self.categorical_decoder is not None:
+            x_cat_recon = self.categorical_decoder(z)
+        else:
+            # Purely-numerical profiles have no categorical reconstruction; return
+            # a zero-width tensor so the outputs dict keeps a stable shape.
+            x_cat_recon = torch.zeros(
+                z.shape[0],
+                self.seq_len,
+                0,
+                device=z.device,
+                dtype=x_num_recon.dtype,
+            )
         return x_num_recon, x_cat_recon
 
     def forward(
