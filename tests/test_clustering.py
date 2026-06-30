@@ -126,14 +126,17 @@ class TestCentroidInitialization:
         """Alpha parameter should affect distribution sharpness."""
         from scry.model.clustering import DECLayer
 
+        torch.manual_seed(42)
         layer_soft = DECLayer(n_clusters=5, latent_dim=8, alpha=0.5)
         layer_sharp = DECLayer(n_clusters=5, latent_dim=8, alpha=2.0)
-
-        torch.manual_seed(42)
+        # Share centroids so alpha is the only difference between the two layers;
+        # otherwise their independent random centroids confound the comparison and
+        # can flip it by a hair on an unlucky draw (it did, on CI for 3.10).
+        layer_sharp.centroids.data.copy_(layer_soft.centroids.data)
         z = torch.randn(16, 8)
         q_soft = layer_soft(z)
         q_sharp = layer_sharp(z)
 
-        # Higher alpha = sharper distribution = higher max probability
+        # Higher alpha = sharper distribution = higher max probability.
         assert q_sharp.max(dim=1).values.mean() >= q_soft.max(dim=1).values.mean()
 
