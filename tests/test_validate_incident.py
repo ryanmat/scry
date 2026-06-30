@@ -238,6 +238,58 @@ def test_step_at_onset_is_not_credited_as_early(keeper_path: str, tmp_path: Path
     assert incident["lead_time_seconds"] <= 0
 
 
+def test_recovered_blip_is_not_credited_as_early_warning() -> None:
+    """A recovered pre-onset blip plus a post-onset alarm must not yield positive lead.
+
+    Exercises evaluate_incidents directly: a sustained blip at 00:10-00:13 that
+    recovers, and the real alarm only from 02:01 (after a 02:00 onset). The blip
+    is causally unrelated and must not be credited as early warning.
+    """
+    onset = pd.Timestamp("2026-01-01T02:00:00Z")
+    end_times = pd.DatetimeIndex(pd.date_range("2026-01-01T00:00:00Z", periods=131, freq="1min"))
+    resource_ids = np.array(["node-a"] * len(end_times), dtype=object)
+    errors = np.zeros(len(end_times))
+    errors[10:14] = 10.0  # recovered blip 00:10-00:13
+    errors[121:126] = 10.0  # real alarm 02:01-02:05
+    incidents = [vi.Incident("node-a", "cpu", onset, pd.Timestamp("2026-01-01T02:10:00Z"))]
+
+    result = vi.evaluate_incidents(
+        errors,
+        resource_ids,
+        end_times,
+        incidents,
+        threshold=1.0,
+        sustain=3,
+        max_leadtime=pd.Timedelta(hours=2),
+    )[0]
+
+    assert result["detected"] is True
+    assert result["lead_time_seconds"] <= 0  # only the post-onset alarm counts
+
+
+def test_run_spanning_onset_yields_its_start_as_lead() -> None:
+    """A sustained run that spans onset is credited from its start (positive lead)."""
+    onset = pd.Timestamp("2026-01-01T02:00:00Z")
+    end_times = pd.DatetimeIndex(pd.date_range("2026-01-01T00:00:00Z", periods=131, freq="1min"))
+    resource_ids = np.array(["node-a"] * len(end_times), dtype=object)
+    errors = np.zeros(len(end_times))
+    errors[115:126] = 10.0  # 01:55-02:05 spans onset
+    incidents = [vi.Incident("node-a", "cpu", onset, pd.Timestamp("2026-01-01T02:10:00Z"))]
+
+    result = vi.evaluate_incidents(
+        errors,
+        resource_ids,
+        end_times,
+        incidents,
+        threshold=1.0,
+        sustain=3,
+        max_leadtime=pd.Timedelta(hours=2),
+    )[0]
+
+    assert result["detected"] is True
+    assert result["lead_time_seconds"] == 300.0  # onset 02:00 - run start 01:55
+
+
 def test_healthy_capture_has_no_detection_and_out_of_sample_fpr(
     keeper_path: str, tmp_path: Path
 ) -> None:
@@ -326,6 +378,11 @@ def test_multiple_incidents_evaluated_independently(keeper_path: str, tmp_path: 
     summary = vi.analyze(keeper_path, capture_csv, labels, _PROFILE)
     assert len(summary["incidents"]) == 2
     assert all(inc["detected"] for inc in summary["incidents"])
+    d0 = pd.to_datetime(summary["incidents"][0]["first_detection_time"])
+    d1 = pd.to_datetime(summary["incidents"][1]["first_detection_time"])
+    # Each incident is attributed to its own onset, not both to the first spike.
+    assert d0 < d1
+    assert d1 > ts[480]  # spike_2 detected in its own horizon, past spike_1's region
 
 
 def test_incident_outside_capture_is_not_detected(keeper_path: str, tmp_path: Path) -> None:

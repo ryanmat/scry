@@ -445,6 +445,44 @@ def _anomaly_runs(flags: np.ndarray, sustain: int) -> list[tuple[int, int]]:
     return runs
 
 
+def _select_detection(
+    spans: list[tuple[pd.Timestamp, pd.Timestamp]],
+    scan_ts: pd.DatetimeIndex,
+    onset: pd.Timestamp,
+) -> pd.Timestamp | None:
+    """Pick the detection time for the alarm that leads into onset, if any.
+
+    A sustained run counts as leading into onset only when it is still active at
+    onset: it starts at or before onset and its last window ends within one
+    inter-window step of onset, so a run that recovers before onset is not
+    credited. Such a run is traced back to its start. If no run reaches onset but
+    one extends into or past it, that is a late detection. A run that both starts
+    and ends before onset (a recovered blip) is ignored.
+
+    Args:
+        spans: Sustained anomalous runs as (start_time, end_time), time-ordered.
+        scan_ts: The scanned window end-times (for the inter-window step).
+        onset: The incident onset.
+
+    Returns:
+        The detection start-time, or None when no run leads into or follows onset.
+    """
+    if not spans:
+        return None
+    step = (
+        pd.Timedelta(np.median(np.diff(scan_ts.values)))
+        if len(scan_ts) > 1
+        else pd.Timedelta(0)
+    )
+    leading = [span for span in spans if span[0] <= onset and span[1] >= onset - step]
+    if leading:
+        return min(leading, key=lambda span: span[0])[0]
+    after = [span for span in spans if span[1] >= onset]
+    if after:
+        return min(after, key=lambda span: span[0])[0]
+    return None
+
+
 def evaluate_incidents(
     errors: np.ndarray,
     resource_ids: np.ndarray,
@@ -457,15 +495,14 @@ def evaluate_incidents(
     """Detect each incident and compute the lead time of the alarm that leads into it.
 
     For each incident, only that resource's windows in the look-back horizon
-    ``[onset - max_leadtime, incident.end]`` are scanned. Among the sustained
-    anomalous runs (>= ``sustain`` consecutive windows over ``threshold``) in that
-    horizon, detection is the run that leads into onset: the run reaching the
-    latest end-time among those that start at or before onset, traced back to its
-    start. If no run starts before onset, the earliest run after onset is a late
-    detection. Lead time is the incident start minus the chosen run's start-time,
-    so a positive value means the alarm began before onset. Anchoring to the
-    horizon keeps an unrelated early-noise blip from being credited as early
-    warning.
+    ``[onset - max_leadtime, incident.end]`` are scanned. Detection is the
+    sustained anomalous run (>= ``sustain`` consecutive windows over
+    ``threshold``) that is still active at onset -- it starts at or before onset
+    and ends within one inter-window step of it -- traced back to its start; lead
+    time is then the incident start minus that start (positive means the alarm
+    began before onset). A run that recovers before onset is a causally-unrelated
+    blip and is not credited. If no run reaches onset but one extends into or past
+    it, that is a late detection (non-positive lead time). See ``_select_detection``.
 
     Args:
         errors: Per-window reconstruction errors.
@@ -482,6 +519,9 @@ def evaluate_incidents(
     results: list[dict[str, Any]] = []
     for incident in incidents:
         resource_mask = resource_ids == incident.resource_id
+        # A run beginning before the horizon is clamped to start at horizon_start
+        # within the scan, so it errs toward under-detection (lead capped at
+        # max_leadtime), never toward a fabricated early warning.
         horizon_start = incident.start - max_leadtime
         scan_mask = (
             resource_mask & (end_times >= horizon_start) & (end_times <= incident.end)
@@ -502,14 +542,8 @@ def evaluate_incidents(
             scan_ts = scan_ts[order]
             flags = errors[scan_mask][order] > threshold
             spans = [(scan_ts[s], scan_ts[e]) for s, e in _anomaly_runs(flags, sustain)]
-            if spans:
-                before = [span for span in spans if span[0] <= incident.start]
-                if before:
-                    # The alarm leading into onset: the run reaching furthest right.
-                    detection_time = max(before, key=lambda span: span[1])[0]
-                else:
-                    # No pre-onset alarm; the earliest run after onset is a late detection.
-                    detection_time = min(spans, key=lambda span: span[0])[0]
+            detection_time = _select_detection(spans, scan_ts, incident.start)
+            if detection_time is not None:
                 result["detected"] = True
                 result["first_detection_time"] = detection_time.isoformat()
                 result["lead_time_seconds"] = (
@@ -527,24 +561,29 @@ def evaluate_incidents(
 
 
 def _time_split(
-    errors: np.ndarray, end_times: pd.DatetimeIndex
+    errors: np.ndarray, end_times: pd.DatetimeIndex, gap: int = 0
 ) -> tuple[np.ndarray, np.ndarray]:
     """Split errors into an earlier (fit) and later (eval) half by end-time.
+
+    A ``gap`` of windows is dropped between the halves so the eval windows share
+    no raw samples with the fit windows (sliding windows overlap), keeping the
+    false-positive rate genuinely out-of-sample.
 
     Args:
         errors: Per-window errors.
         end_times: Matching per-window end timestamps.
+        gap: Number of windows to drop between the fit and eval halves.
 
     Returns:
         Tuple of (earlier_half, later_half). The later half is empty when there
-        are fewer than two windows.
+        are too few windows to leave any after the gap.
     """
     if errors.size < 2:
         return errors, np.zeros(0, dtype=errors.dtype)
     order = np.argsort(end_times.values, kind="stable")
     ordered = errors[order]
     mid = ordered.size // 2
-    return ordered[:mid], ordered[mid:]
+    return ordered[:mid], ordered[mid + gap :]
 
 
 def compute_threshold(
@@ -553,6 +592,7 @@ def compute_threshold(
     incidents: list[Incident],
     reference_errors: np.ndarray | None,
     quantile: float,
+    gap: int,
 ) -> tuple[float, str, np.ndarray, np.ndarray]:
     """Derive the anomaly threshold from healthy windows, held out for the FPR.
 
@@ -562,8 +602,11 @@ def compute_threshold(
     reference and evaluated on the main capture's pre-incident windows. Otherwise
     the pre-incident windows (those ending strictly before the earliest incident)
     are time-split: the earlier half fits the threshold and the later half
-    evaluates it. The incident windows are never used, so a large incident cannot
-    inflate its own threshold.
+    evaluates it, with a ``gap`` of windows dropped between them so the two sets
+    share no raw samples. The incident windows are never used, so a large incident cannot
+    inflate its own threshold. The temporal split assumes the pre-onset windows
+    are healthy; a precursor that begins before the labeled onset would leak into
+    it, so prefer ``--reference`` when pre-onset drift is expected.
 
     Args:
         errors: Per-window errors for the incident capture.
@@ -571,6 +614,7 @@ def compute_threshold(
         incidents: Labeled incidents (for the temporal split).
         reference_errors: Optional healthy errors from a reference capture.
         quantile: Threshold quantile over the fit errors.
+        gap: Windows to drop between the fit and eval halves (the window overlap).
 
     Returns:
         Tuple of (threshold, source, fit_errors, eval_errors). ``eval_errors`` may
@@ -596,9 +640,7 @@ def compute_threshold(
                 "windows end before the earliest incident start. Provide a "
                 "--reference healthy capture instead."
             )
-        fit, eval_ = _time_split(pre_errors, pre_times)
-        if fit.size == 0:
-            fit = pre_errors  # too few to split; fit on all, no held-out eval
+        fit, eval_ = _time_split(pre_errors, pre_times, gap=gap)
 
     if fit.size == 0:
         raise ValueError("No healthy windows available to fit the threshold.")
@@ -670,8 +712,11 @@ def analyze(
             keeper.model, ref_windows.x_num, ref_windows.x_cat, keeper.device
         )
 
+    # Drop a gap spanning the window overlap (ceil(seq_len / step) windows) between
+    # the fit and eval halves so the held-out FPR shares no raw samples with the fit.
+    overlap_gap = -(-seq_len // step)
     threshold, source, fit_errors, eval_errors = compute_threshold(
-        errors, windows.end_times, incidents, reference_errors, threshold_quantile
+        errors, windows.end_times, incidents, reference_errors, threshold_quantile, overlap_gap
     )
     healthy_fpr = float(np.mean(eval_errors > threshold)) if eval_errors.size else None
 
