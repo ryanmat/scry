@@ -163,3 +163,20 @@ class TestTemporalXDEC:
         # Should be different due to reparameterization sampling
         assert not torch.allclose(z1, z2)
 
+    def test_numerical_only_build_and_forward(self) -> None:
+        """Model with num_categorical=0 should build and forward end to end."""
+        from scry.model.xdec import TemporalXDEC
+
+        model = TemporalXDEC(num_numerical=9, num_categorical=0, n_clusters=5)
+
+        x_num = torch.randn(8, 30, 9)
+        x_cat = torch.empty(8, 30, 0)
+
+        output = model(x_num, x_cat)
+
+        assert output["z"].shape == (8, 8)
+        assert output["x_num_recon"].shape == (8, 30, 9)
+        assert output["x_cat_recon"].shape == (8, 30, 0)
+        assert output["q"].shape == (8, 5)
+        torch.testing.assert_close(output["q"].sum(dim=1), torch.ones(8))
+

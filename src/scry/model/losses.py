@@ -33,8 +33,14 @@ def reconstruction_loss_categorical(
         x_recon: Reconstructed categorical features (batch, seq_len, num_features).
 
     Returns:
-        Scalar BCE loss averaged over all elements.
+        Scalar BCE loss averaged over all elements. Zero for purely-numerical
+        profiles, where the categorical tensor is zero-width.
     """
+    # Purely-numerical profiles (num_categorical=0) carry a zero-width
+    # categorical tensor; BCE over zero elements is undefined, so the term
+    # contributes nothing and the total/gradients are unaffected.
+    if x_recon.shape[-1] == 0:
+        return x_recon.new_zeros(())
     return F.binary_cross_entropy(x_recon, x, reduction="mean")
 
 
