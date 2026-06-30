@@ -168,6 +168,32 @@ async def test_fetcher_check_profile_coverage_does_not_raise(
     assert any("p_absent" in w for w in result["warnings"])
 
 
+async def test_coverage_carries_profile_description(
+    features_yaml: Path, coverage_parquet: Path
+) -> None:
+    """Each profile's description flows through into the coverage output."""
+    source = ObjectStoreSource(str(coverage_parquet))
+    by_name = {p["name"]: p for p in (await source.get_profile_coverage())["profiles"]}
+    assert by_name["p_present"]["description"] == "partially covered"
+    assert by_name["p_empty"]["description"] == "no required features"
+
+
+def test_bundled_profiles_honesty() -> None:
+    """The shipped config marks dataless profiles unverified and leaves verified ones unmarked."""
+    import yaml
+
+    cfg_path = Path(__file__).resolve().parents[1] / "config" / "features.yaml"
+    profiles = yaml.safe_load(cfg_path.read_text())["profiles"]
+
+    unverified = ["kubernetes", "kubevirt", "network", "database", "cloud_compute", "application"]
+    for name in unverified:
+        assert "unverified" in profiles[name]["description"].lower(), name
+
+    # Capture-verified profiles must not be marked unverified.
+    for name in ["aro_node", "petclinic_collector"]:
+        assert "unverified" not in profiles[name]["description"].lower(), name
+
+
 # --- quality -----------------------------------------------------------------
 
 
