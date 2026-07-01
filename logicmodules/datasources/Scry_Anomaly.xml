@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" ?>
-<!-- Description: LogicMonitor DataSource for collecting anomaly detection metrics from Scry API. -->
-<!-- Description: Polls the /anomaly endpoint and stores forecast-based anomaly detection results. -->
+<!-- Description: LogicMonitor DataSource for the Scry X-DEC reconstruction-anomaly signal. -->
+<!-- Description: Polls /anomaly/reconstruction/lookup and stores the error/threshold ratio and flag. -->
 <feed  version="1.0" ha498="true">
   <header>
     <company>Scry</company>
@@ -13,7 +13,7 @@
       <id></id>
       <name>Scry_Anomaly</name>
       <displayedas>Scry Anomaly</displayedas>
-      <description>Monitors forecast-based anomaly detection from the Scry API. Alerts when actual metric values fall outside Chronos-2 prediction intervals, indicating anomalous infrastructure behavior.</description>
+      <description>Monitors the Scry X-DEC reconstruction anomaly per resource. AnomalyScore is the per-window reconstruction error as a ratio of the model's healthy threshold; a score rising above 1 (warn) then 2 (error) indicates the resource is drifting from its learned normal behavior ahead of degradation.</description>
       <group>Scry</group>
       <tags></tags>
       <auditVersion></auditVersion>
@@ -31,7 +31,7 @@
           <originId></originId>
           <dataType>7</dataType>
           <type>2</type>
-          <description>1 if anomaly detected (actuals outside prediction interval), 0 otherwise</description>
+          <description>1 if the reconstruction ratio exceeds 1 (error above the healthy threshold), 0 otherwise</description>
           <maxValue></maxValue>
           <minValue></minValue>
           <maxDigits>4</maxDigits>
@@ -41,8 +41,8 @@
           <useValue>output</useValue>
           <alertTransitionInterval>0</alertTransitionInterval>
           <alertClearTransitionInterval>0</alertClearTransitionInterval>
-          <alertExpr>= 1 error</alertExpr>
-          <alertExprNote>Anomaly detected: actual metrics outside forecast prediction interval</alertExprNote>
+          <alertExpr></alertExpr>
+          <alertExprNote>Non-alerting binary flag (1 when ratio &gt; 1). AnomalyScore carries the graded warn/error alert; this is left non-alerting to avoid a second, ungraded error the instant the ratio crosses 1.</alertExprNote>
           <alertSubject></alertSubject>
           <alertBody></alertBody>
           <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
@@ -62,7 +62,7 @@
           <originId></originId>
           <dataType>7</dataType>
           <type>2</type>
-          <description>Max normalized violation magnitude across all metrics (0 = no violation)</description>
+          <description>Reconstruction error as a ratio of the healthy threshold (1 = at threshold, &gt;1 = anomalous)</description>
           <maxValue></maxValue>
           <minValue></minValue>
           <maxDigits>4</maxDigits>
@@ -93,7 +93,7 @@
           <originId></originId>
           <dataType>7</dataType>
           <type>2</type>
-          <description>Number of metrics that violated their forecast bounds</description>
+          <description>Unused by the reconstruction signal (always 0); retained for graph continuity</description>
           <maxValue></maxValue>
           <minValue></minValue>
           <maxDigits>4</maxDigits>
@@ -134,8 +134,8 @@
           <useValue>output</useValue>
           <alertTransitionInterval>0</alertTransitionInterval>
           <alertClearTransitionInterval>0</alertClearTransitionInterval>
-          <alertExpr>&gt;= 3 error &gt;= 2 warn</alertExpr>
-          <alertExprNote>High or critical anomaly severity detected</alertExprNote>
+          <alertExpr>&gt;= 4 error &gt;= 2 warn</alertExpr>
+          <alertExprNote>Severity from the reconstruction ratio: warn at &gt;= 2 (ratio &gt; 1), error at 4 (ratio &gt; 2), matching AnomalyScore's warn/error boundaries.</alertExprNote>
           <alertSubject></alertSubject>
           <alertBody></alertBody>
           <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
@@ -144,6 +144,37 @@
           <erroradadvsetting></erroradadvsetting>
           <criticaladadvsetting></criticaladadvsetting>
           <userParam1>Severity</userParam1>
+          <userParam2></userParam2>
+          <userParam3></userParam3>
+          <isComposite>false</isComposite>
+          <rpn></rpn>
+        </dataPoint>
+        <dataPoint>
+          <id></id>
+          <name>Coverage</name>
+          <originId></originId>
+          <dataType>7</dataType>
+          <type>2</type>
+          <description>Fraction (0-1) of the model's numerical features actually scored in the latest window; a low or zero value flags a data-collection gap even when AnomalyScore reads 0</description>
+          <maxValue>1</maxValue>
+          <minValue>0</minValue>
+          <maxDigits>4</maxDigits>
+          <postProcessorMethod>namevalue</postProcessorMethod>
+          <postProcessorParam>Coverage</postProcessorParam>
+          <rawDataFieldName>output</rawDataFieldName>
+          <useValue>output</useValue>
+          <alertTransitionInterval>3</alertTransitionInterval>
+          <alertClearTransitionInterval>0</alertClearTransitionInterval>
+          <alertExpr>&lt; 0.5 warn</alertExpr>
+          <alertExprNote>Fewer than half the model's numerical features were scored (or the resource was not scored at all); the reconstruction signal is running on partial data. Sustained for 3 polls to ignore cold-start.</alertExprNote>
+          <alertSubject></alertSubject>
+          <alertBody></alertBody>
+          <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
+          <adadvsettingenabled>false</adadvsettingenabled>
+          <warnadadvsetting></warnadadvsetting>
+          <erroradadvsetting></erroradadvsetting>
+          <criticaladadvsetting></criticaladadvsetting>
+          <userParam1>Coverage</userParam1>
           <userParam2></userParam2>
           <userParam3></userParam3>
           <isComposite>false</isComposite>
@@ -166,7 +197,7 @@
           <alertTransitionInterval>0</alertTransitionInterval>
           <alertClearTransitionInterval>0</alertClearTransitionInterval>
           <alertExpr>= 0 error</alertExpr>
-          <alertExprNote>Anomaly detection API unreachable</alertExprNote>
+          <alertExprNote>Anomaly detection API unreachable (connection failure) or not ready (5xx, e.g. model not loaded)</alertExprNote>
           <alertSubject></alertSubject>
           <alertBody></alertBody>
           <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
@@ -282,64 +313,70 @@
       <overviewGraphs></overviewGraphs>
       <scripts>
         <groovyScript><![CDATA[
-// Description: Collects anomaly detection metrics from Scry API /anomaly endpoint.
-// Description: Stores forecast-based anomaly detection results as DataSource metrics.
+// Description: Collects the Scry X-DEC reconstruction-anomaly score for this resource.
+// Description: Polls /anomaly/reconstruction/lookup and emits the error/threshold ratio and flag.
 
 import com.santaba.agent.groovyapi.http.*
 import groovy.json.JsonSlurper
 
 // Configuration
 def apiUrl = hostProps.get("scry.api.url") ?: "https://your-scry-api.example.com"
+def resourceId = hostProps.get("system.displayName")
 def timeout = 10000 // 10 seconds
-
-// Severity string to numeric mapping
-def severityMap = [
-    "low": 1,
-    "medium": 2,
-    "high": 3,
-    "critical": 4
-]
 
 try {
     def startTime = System.currentTimeMillis()
 
-    // Make HTTP request to anomaly endpoint
+    // Score this resource's most recent window via the reconstruction endpoint.
+    def encodedResourceId = URLEncoder.encode(resourceId, "UTF-8")
     def httpClient = HTTP.open(apiUrl, timeout)
-    def response = httpClient.get("/anomaly")
+    def response = httpClient.get("/anomaly/reconstruction/lookup?resource_id=${encodedResourceId}")
     def responseTime = System.currentTimeMillis() - startTime
 
     if (response.getStatusCode() == 200) {
         def json = new JsonSlurper().parseText(response.getBody())
 
         def isAnomaly = json.is_anomaly ? 1 : 0
-        def anomalyScore = json.anomaly_score ?: 0.0
-        def violatedMetrics = json.violated_metrics ?: []
-        def severity = severityMap[json.severity] ?: 1
+        // ratio is null until a healthy threshold is baked, or when the window was too
+        // short / had no numerical data to score; treat null as 0 (no alert).
+        def anomalyScore = json.ratio != null ? json.ratio : 0.0
+        def severity = json.severity ?: 1
+        // coverage is the fraction of the model's numerical features actually scored;
+        // a low value flags a data-collection gap even when AnomalyScore reads 0.
+        def coverage = json.coverage != null ? json.coverage : 0.0
 
         // Output metrics
         println "IsAnomaly=${isAnomaly}"
         println "AnomalyScore=${anomalyScore}"
-        println "ViolatedMetricCount=${violatedMetrics.size()}"
+        println "ViolatedMetricCount=0"
         println "Severity=${severity}"
+        println "Coverage=${coverage}"
         println "ApiStatus=1"
         println "ApiLatencyMs=${responseTime}"
 
     } else {
-        // API returned error
+        // Non-200: 404 (no recent data for this resource) and 409 (ambiguous name) are
+        // per-resource conditions on a healthy API. A 503 (model not loaded or no data
+        // source) or any other 5xx means the service cannot serve, so it is reported
+        // unhealthy; a genuine connection failure is caught below.
+        def status = response.getStatusCode()
+        def apiStatus = (status == 404 || status == 409) ? 1 : 0
         println "IsAnomaly=0"
         println "AnomalyScore=0"
         println "ViolatedMetricCount=0"
         println "Severity=1"
-        println "ApiStatus=0"
+        println "Coverage=0"
+        println "ApiStatus=${apiStatus}"
         println "ApiLatencyMs=${responseTime}"
     }
 
 } catch (Exception e) {
-    // Connection or parsing error
+    // Connection or parsing error: the API is genuinely unreachable.
     println "IsAnomaly=0"
     println "AnomalyScore=0"
     println "ViolatedMetricCount=0"
     println "Severity=1"
+    println "Coverage=0"
     println "ApiStatus=0"
     println "ApiLatencyMs=0"
 }

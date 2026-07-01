@@ -72,8 +72,8 @@
           <useValue>output</useValue>
           <alertTransitionInterval>0</alertTransitionInterval>
           <alertClearTransitionInterval>0</alertClearTransitionInterval>
-          <alertExpr>&lt; 60 warn</alertExpr>
-          <alertExprNote>Low prediction confidence may indicate model needs retraining</alertExprNote>
+          <alertExpr></alertExpr>
+          <alertExprNote>Disabled for the keeper demo: the healthy-trained keeper's clustering is degenerate, so confidence is not meaningful. The reconstruction signal (Scry_Anomaly) is authoritative. Re-enable for a model with distinct operational-state clusters.</alertExprNote>
           <alertSubject></alertSubject>
           <alertBody></alertBody>
           <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
@@ -103,8 +103,8 @@
           <useValue>output</useValue>
           <alertTransitionInterval>0</alertTransitionInterval>
           <alertClearTransitionInterval>0</alertClearTransitionInterval>
-          <alertExpr>&gt;= 3 error &gt;= 2 warn</alertExpr>
-          <alertExprNote>HIGH priority indicates predicted issue requiring attention</alertExprNote>
+          <alertExpr></alertExpr>
+          <alertExprNote>Disabled for the keeper demo: cluster-derived priority is not meaningful on the healthy-trained keeper (degenerate clustering). Re-enable for a model with distinct operational-state clusters.</alertExprNote>
           <alertSubject></alertSubject>
           <alertBody></alertBody>
           <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
@@ -134,8 +134,8 @@
           <useValue>output</useValue>
           <alertTransitionInterval>0</alertTransitionInterval>
           <alertClearTransitionInterval>0</alertClearTransitionInterval>
-          <alertExpr>= 0 error</alertExpr>
-          <alertExprNote>Resource predicted to be in non-normal state</alertExprNote>
+          <alertExpr></alertExpr>
+          <alertExprNote>Disabled for the keeper demo: the healthy-trained keeper's clustering is degenerate (balanced across clusters), so cluster state is not meaningful. Re-enable for a model with distinct operational-state clusters.</alertExprNote>
           <alertSubject></alertSubject>
           <alertBody></alertBody>
           <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
@@ -165,8 +165,8 @@
           <useValue>output</useValue>
           <alertTransitionInterval>0</alertTransitionInterval>
           <alertClearTransitionInterval>0</alertClearTransitionInterval>
-          <alertExpr>= 1 error</alertExpr>
-          <alertExprNote>Prediction indicates action is recommended</alertExprNote>
+          <alertExpr></alertExpr>
+          <alertExprNote>Disabled for the keeper demo: cluster-derived action is not meaningful on the healthy-trained keeper (degenerate clustering). Re-enable for a model with distinct operational-state clusters.</alertExprNote>
           <alertSubject></alertSubject>
           <alertBody></alertBody>
           <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
