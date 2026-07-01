@@ -1,196 +1,30 @@
 # Description: Tests for the incident-validation harness (scripts/validate_incident.py).
-# Description: Trains a tiny keeper, injects precursors/anomalies, and checks lead time and leakage.
+# Description: Injects precursors/anomalies into synthetic captures and checks lead time and leakage.
 
 """Deterministic, mock-free tests for the incident-validation harness.
 
-Each test trains a tiny keeper X-DEC on synthetic normal data, writes synthetic
-captures as CSV (read through the real object-store path), and exercises the
-harness end to end: genuine early warning from a precursor (positive lead time),
-a step at onset that is not credited as early, out-of-sample false-positive rate,
-multi-resource attribution, the reference-threshold path, and the healthy-only
-threshold leakage guard.
+Each test runs a tiny keeper X-DEC (the shared ``keeper_path`` fixture) over
+synthetic captures written as CSV (read through the real object-store path), and
+exercises the harness end to end: genuine early warning from a precursor (positive
+lead time), a step at onset that is not credited as early, out-of-sample
+false-positive rate, multi-resource attribution, the reference-threshold path, and
+the healthy-only threshold leakage guard. The capture generators and the keeper
+fixture are shared through ``conftest.py``.
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
-import torch
-import torch.nn.functional as F  # noqa: N812 -- PyTorch convention
 import validate_incident as vi
-
-from scry.data.feature_engineering import set_active_profile
-from scry.data.fetcher import DataFetcher
-from scry.data.pipeline import XDECFeaturePipeline
-from scry.model.xdec import TemporalXDEC
-from scry.utils.config import get_config
-
-# A subset of the aro_node profile features; the capture supplies exactly these.
-_SERIES = ("cpuUsageNanoCores", "memoryUsageBytes", "fsUsedBytes")
-_CAT = ("ksmMetricsAvailable", "summaryMetricsAvailable")
-_PROFILE = "aro_node"
-_SEQ_LEN = 30
-
-
-def _gen_capture(
-    resource: str,
-    n: int,
-    seed: int,
-    *,
-    spike: tuple[int, int, float] | None = None,
-    ramp: tuple[int, int, float] | None = None,
-) -> tuple[pd.DataFrame, pd.DatetimeIndex]:
-    """Generate a synthetic long-format capture for one resource.
-
-    Args:
-        resource: Resource id.
-        n: Number of timesteps (1-minute cadence).
-        seed: RNG seed for reproducibility.
-        spike: Optional (lo, hi, multiplier) step injected into cpuUsageNanoCores.
-        ramp: Optional (lo, hi, peak) linear precursor scaling cpu 1.0 -> peak.
-
-    Returns:
-        Tuple of (long-format DataFrame, timestamp index).
-    """
-    rng = np.random.default_rng(seed)
-    t = np.arange(n)
-    cpu = 1e8 + 5e6 * np.sin(t / 15.0) + rng.normal(0, 3e6, n)
-    mem = 5e8 + 1e7 * np.sin(t / 20.0) + rng.normal(0, 5e6, n)
-    fs = 1e9 + rng.normal(0, 8e6, n)
-    timestamps = pd.date_range("2026-01-01T00:00:00Z", periods=n, freq="1min")
-
-    if ramp is not None:
-        lo, hi, peak = ramp
-        cpu[lo:hi] = cpu[lo:hi] * np.linspace(1.0, peak, hi - lo)
-    if spike is not None:
-        lo, hi, mult = spike
-        cpu[lo:hi] = cpu[lo:hi] * mult
-
-    series = {
-        "cpuUsageNanoCores": cpu,
-        "memoryUsageBytes": mem,
-        "fsUsedBytes": fs,
-        "ksmMetricsAvailable": np.ones(n),
-        "summaryMetricsAvailable": np.ones(n),
-    }
-    rows = [
-        {
-            "resource_id": resource,
-            "metric_name": name,
-            "timestamp": timestamps[i].isoformat(),
-            "value": float(values[i]),
-        }
-        for name, values in series.items()
-        for i in range(n)
-    ]
-    return pd.DataFrame(rows), timestamps
-
-
-def _write_csv(df: pd.DataFrame, path: Path) -> str:
-    """Write a capture DataFrame to CSV and return its path string."""
-    df.to_csv(path, index=False)
-    return str(path)
-
-
-def _write_labels(path: Path, entries: list[dict[str, str]]) -> str:
-    """Write a labels JSON from a list of incident entries and return its path."""
-    path.write_text(json.dumps(entries))
-    return str(path)
-
-
-def _incident(
-    resource: str, incident_type: str, start: pd.Timestamp, end: pd.Timestamp
-) -> dict[str, str]:
-    """Build one labels entry."""
-    return {
-        "resource_id": resource,
-        "type": incident_type,
-        "start": start.isoformat(),
-        "end": end.isoformat(),
-    }
-
-
-@pytest.fixture(scope="module")
-def keeper_path(tmp_path_factory: pytest.TempPathFactory) -> str:
-    """Train a tiny keeper on synthetic normal data and save its checkpoint.
-
-    The training data is windowed and normalized through the real feature
-    pipeline so the checkpoint carries the same stored normalization the harness
-    re-applies to incident windows.
-    """
-    tmp = tmp_path_factory.mktemp("keeper")
-    train_df, _ = _gen_capture("train-node", 800, seed=1)
-    train_csv = _write_csv(train_df, tmp / "train.csv")
-
-    set_active_profile(_PROFILE)
-    fetcher = DataFetcher.from_object_store(train_csv)
-    pipeline = XDECFeaturePipeline(fetcher, get_config())
-    start = pd.Timestamp("2025-01-01T00:00:00Z").to_pydatetime()
-    end = pd.Timestamp("2027-01-01T00:00:00Z").to_pydatetime()
-    raw = asyncio.run(pipeline.extract(start, end, profile=_PROFILE))
-    data = pipeline.transform(raw)
-
-    assert data["num_windows"].shape[0] > 0
-    assert data["feature_names"]["numerical"] == list(_SERIES)
-
-    torch.manual_seed(0)
-    np.random.seed(0)
-    model = TemporalXDEC(
-        num_numerical=len(_SERIES),
-        num_categorical=len(_CAT),
-        seq_len=_SEQ_LEN,
-        num_hidden=16,
-        cat_hidden=8,
-        latent_dim=4,
-        n_clusters=3,
-    )
-    x_num = torch.tensor(data["num_windows"], dtype=torch.float32)
-    x_cat = torch.tensor(data["cat_windows"], dtype=torch.float32)
-    optimizer = torch.optim.Adam(model.parameters(), lr=5e-3)
-    model.train()
-    for _ in range(500):
-        optimizer.zero_grad()
-        out = model.xvae(x_num, x_cat)
-        loss = F.mse_loss(out["x_num_recon"], x_num) + F.mse_loss(out["x_cat_recon"], x_cat)
-        loss.backward()
-        optimizer.step()
-    model.eval()
-
-    ckpt_path = tmp / "keeper.pt"
-    torch.save(
-        {
-            "model_state_dict": model.state_dict(),
-            "config": {
-                "num_numerical": len(_SERIES),
-                "num_categorical": len(_CAT),
-                "seq_len": _SEQ_LEN,
-                "num_hidden": 16,
-                "cat_hidden": 8,
-                "latent_dim": 4,
-                "n_clusters": 3,
-            },
-            "normalization": {
-                "mean": data["num_norm_params"]["mean"],
-                "std": data["num_norm_params"]["std"],
-            },
-            "categorical_normalization": {
-                "min": data["cat_norm_params"]["min"],
-                "max": data["cat_norm_params"]["max"],
-            },
-            "feature_schema": {
-                "numerical": data["feature_names"]["numerical"],
-                "categorical": data["feature_names"]["categorical"],
-                "profile": _PROFILE,
-            },
-        },
-        ckpt_path,
-    )
-    return str(ckpt_path)
+from synth import PROFILE as _PROFILE
+from synth import gen_capture as _gen_capture
+from synth import make_incident as _incident
+from synth import write_csv as _write_csv
+from synth import write_labels as _write_labels
 
 
 def test_precursor_yields_positive_lead_time(keeper_path: str, tmp_path: Path) -> None:

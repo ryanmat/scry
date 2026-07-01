@@ -1,5 +1,5 @@
 # Description: FastAPI application for the prediction service.
-# Description: Exposes /health, /predict, /predict/lookup, /clusters, /forecast, /drift, /anomaly, /accuracy.
+# Description: Exposes /health, /predict(/lookup), /anomaly/reconstruction(/lookup), /clusters, /forecast, /drift, /anomaly, /accuracy.
 
 """FastAPI application for cluster prediction."""
 
@@ -23,6 +23,8 @@ from scry.api.schemas import (
     MetricForecast,
     PredictionRequest,
     PredictionResponse,
+    ReconstructionRequest,
+    ReconstructionResponse,
     get_cluster_info,
 )
 from scry.utils.config import get_config
@@ -38,6 +40,10 @@ logging.basicConfig(
 
 # API version
 VERSION = "0.1.0"
+
+# Lookback for the reconstruction lookup: only the most recent seq_len samples are
+# scored, so a short window keeps the object-store fetch small.
+_RECON_LOOKBACK_DAYS = 7
 
 
 def _data_uri() -> str | None:
@@ -206,9 +212,11 @@ def create_app(model_path: str | None = None) -> FastAPI:
         uptime = time.monotonic() - app.state.started_at
 
         model_version = None
+        recon_threshold = None
         if app.state.predictor is not None:
             cfg = app.state.predictor.config
             model_version = f"xdec-k{cfg['n_clusters']}-d{cfg['latent_dim']}"
+            recon_threshold = app.state.predictor.recon_threshold
         env_version = os.environ.get("MODEL_VERSION")
         if env_version:
             model_version = f"{model_version}-{env_version}" if model_version else env_version
@@ -222,6 +230,7 @@ def create_app(model_path: str | None = None) -> FastAPI:
             model_path=app.state.model_path,
             datasource=_datasource_descriptor(),
             chronos_loaded=app.state.forecaster.is_loaded,
+            recon_threshold=recon_threshold,
             uptime_seconds=round(uptime, 2),
         )
 
@@ -331,6 +340,111 @@ def create_app(model_path: str | None = None) -> FastAPI:
                 confidence=result["confidence"],
                 action=result["action"],
                 priority=result["priority"],
+            )
+
+    @app.post("/anomaly/reconstruction", response_model=ReconstructionResponse)
+    def reconstruction(request: ReconstructionRequest) -> ReconstructionResponse:
+        """Score the reconstruction anomaly for metrics supplied in the request body.
+
+        This is the keeper's validated signal: the per-window reconstruction error
+        as a ratio against the persisted healthy threshold. Portable; needs no data
+        source.
+
+        Raises:
+            HTTPException: 503 if the model is not loaded.
+        """
+        if not app.state.model_loaded:
+            raise HTTPException(status_code=503, detail="Model not loaded")
+
+        result = app.state.predictor.reconstruction_error(
+            numerical_metrics=request.numerical_metrics,
+            categorical_metrics=request.categorical_metrics,
+        )
+        return ReconstructionResponse(
+            resource_id=request.resource_id,
+            reconstruction_error=result["reconstruction_error"],
+            threshold=result["threshold"],
+            ratio=result["ratio"],
+            is_anomaly=result["is_anomaly"],
+            severity=result["severity"],
+            coverage=result["coverage"],
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+
+    @app.get("/anomaly/reconstruction/lookup", response_model=ReconstructionResponse)
+    async def reconstruction_lookup(
+        resource_id: str = Query(..., description="Resource id or hostname to look up"),
+    ) -> ReconstructionResponse:
+        """Look up a resource's recent metrics from the object store and score reconstruction.
+
+        Mirrors ``/predict/lookup``: pulls the resource's recent window through the
+        object-store seam (``SCRY_DATA_URI``) and scores it. This is the path the
+        LogicMonitor ``Scry_Anomaly`` DataSource polls.
+
+        Raises:
+            HTTPException: 503 if the model is not loaded or no source is configured,
+                404 if the resource has no usable recent metrics, 409 if the id is
+                ambiguous, 502 on a source error.
+        """
+        with tracer.start_as_current_span("reconstruction_lookup") as span:
+            span.set_attribute("resource_id", resource_id)
+
+            if not app.state.model_loaded:
+                raise HTTPException(status_code=503, detail="Model not loaded")
+
+            # The model's own training profile is authoritative for the num/cat split.
+            model_profile = app.state.predictor.feature_schema.get("profile")
+            profile_name = model_profile or os.environ.get("SCRY_PROFILE")
+
+            try:
+                df = await _resource_metrics(
+                    resource_id, lookback_days=_RECON_LOOKBACK_DAYS, profile=profile_name
+                )
+            except Exception as e:
+                logger.error(
+                    "reconstruction lookup fetch failed: %s: %s", type(e).__name__, e
+                )
+                raise HTTPException(status_code=502, detail=f"data source error: {e}") from e
+
+            if df is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="No data source configured. Set SCRY_DATA_URI to an object-store URI.",
+                )
+            if df.empty:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No recent metrics found for resource '{resource_id}'",
+                )
+
+            # Refuse to silently pool multiple resources into one score.
+            ids = sorted(df["resource_id"].astype(str).unique())
+            if len(ids) > 1:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": (
+                            f"Ambiguous resource '{resource_id}': matched {len(ids)} "
+                            "resources. Specify the exact resource_id."
+                        ),
+                        "candidates": ids[:20],
+                    },
+                )
+
+            # Score the fetched long-format frame directly through the shared
+            # windowing (the same path the threshold was baked on), so the metrics
+            # are aligned on one timestamp grid rather than flattened per metric.
+            result = app.state.predictor.score_reconstruction(df)
+            span.set_attribute("reconstruction.is_anomaly", result["is_anomaly"])
+            return ReconstructionResponse(
+                resource_id=resource_id,
+                reconstruction_error=result["reconstruction_error"],
+                threshold=result["threshold"],
+                ratio=result["ratio"],
+                is_anomaly=result["is_anomaly"],
+                severity=result["severity"],
+                coverage=result["coverage"],
+                timestamp=datetime.now(timezone.utc).isoformat(),
             )
 
     @app.post("/forecast", response_model=ForecastResponse)

@@ -4,6 +4,7 @@
 """Prediction service for the API."""
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,9 @@ import pandas as pd
 import torch
 
 from scry.api.schemas import CLUSTER_DEFINITIONS
+from scry.data.windowing import build_windows
 from scry.model import TemporalXDEC
+from scry.model.reconstruction import reconstruction_errors
 from scry.utils.tracing import get_tracer
 
 tracer = get_tracer(__name__)
@@ -21,6 +24,61 @@ logger = logging.getLogger(__name__)
 
 class ModelSchemaError(ValueError):
     """Raised when a checkpoint has no usable feature schema for by-name alignment."""
+
+
+def _severity_from_ratio(ratio: float) -> int:
+    """Map a reconstruction ratio (error / threshold) to a 1-4 severity band.
+
+    1: at/below threshold; 2: 1-1.5x; 3: 1.5-2x; 4: above 2x. The ``Scry_Anomaly``
+    datapoint alerts warn at ratio > 1 and error at ratio > 2, so severity >= 2 is
+    the warn band and severity 4 is the error band.
+    """
+    if ratio > 2.0:
+        return 4
+    if ratio > 1.5:
+        return 3
+    if ratio > 1.0:
+        return 2
+    return 1
+
+
+def _frame_from_series(
+    numerical_metrics: dict[str, list[float]],
+    categorical_metrics: dict[str, list[int]],
+) -> pd.DataFrame:
+    """Build a canonical long-format frame from parallel request series.
+
+    The series are treated as parallel samples aligned at the end (most recent
+    last) on a shared synthetic 1-minute grid, so unequal-length series land on one
+    timeline the way a real capture would, rather than each being sliced
+    independently. This is what lets the request path window and normalize
+    identically to the bake/validation path.
+    """
+    columns = ["resource_id", "metric_name", "timestamp", "value"]
+    series = {**numerical_metrics, **categorical_metrics}
+    lengths = [len(v) for v in series.values() if v]
+    if not lengths:
+        return pd.DataFrame(columns=columns)
+
+    grid_len = max(lengths)
+    base = pd.Timestamp("2000-01-01T00:00:00Z")
+    grid = base + pd.to_timedelta(np.arange(grid_len), unit="m")
+
+    rows = []
+    for name, values in series.items():
+        if not values:
+            continue
+        offset = grid_len - len(values)  # end-align: last sample is most recent
+        for i, value in enumerate(values):
+            rows.append(
+                {
+                    "resource_id": "request",
+                    "metric_name": name,
+                    "timestamp": grid[offset + i],
+                    "value": float(value),
+                }
+            )
+    return pd.DataFrame(rows, columns=columns)
 
 
 class Predictor:
@@ -129,6 +187,46 @@ class Predictor:
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.model.to(self.device)
         self.model.eval()
+
+        # Serving block (persisted by scripts/bake_serving_threshold.py) carries the
+        # healthy reconstruction threshold. An env override lets an operator retune
+        # it without re-baking. Absent both, the reconstruction endpoint still runs
+        # and returns the raw error with a null ratio.
+        self.serving = checkpoint.get("serving")
+        self.recon_threshold = self._resolve_recon_threshold(self.serving)
+        if self.recon_threshold is None:
+            logger.warning(
+                "no reconstruction threshold configured (no serving block and no "
+                "SCRY_RECON_THRESHOLD); /anomaly/reconstruction will report a null ratio "
+                "and never flag anomalies until a threshold is baked via "
+                "scripts/bake_serving_threshold.py"
+            )
+
+    @staticmethod
+    def _resolve_recon_threshold(serving: dict[str, Any] | None) -> float | None:
+        """Resolve the reconstruction threshold: env override, else serving block, else None.
+
+        A non-positive value (from either source) is rejected with a warning, since
+        the reconstruction error is a non-negative MSE and a threshold <= 0 cannot
+        discriminate. This keeps ``/health/detailed`` and the scoring path in
+        agreement rather than advertising a threshold the scorer would ignore.
+        """
+        env_value = os.environ.get("SCRY_RECON_THRESHOLD")
+        if env_value is not None:
+            try:
+                parsed = float(env_value)
+            except ValueError:
+                logger.warning("ignoring invalid SCRY_RECON_THRESHOLD=%r (not a float)", env_value)
+            else:
+                if parsed > 0:
+                    return parsed
+                logger.warning("ignoring non-positive SCRY_RECON_THRESHOLD=%r", env_value)
+        if serving and serving.get("threshold") is not None:
+            threshold = float(serving["threshold"])
+            if threshold > 0:
+                return threshold
+            logger.warning("ignoring non-positive serving threshold %r in checkpoint", threshold)
+        return None
 
     @staticmethod
     def _fit_length(values: np.ndarray, seq_len: int) -> np.ndarray:
@@ -341,3 +439,134 @@ class Predictor:
                     _, mu, _ = self.model.xvae.encode(x_num, x_cat)
 
             return mu.cpu().numpy().squeeze()
+
+    def reconstruction_error(
+        self,
+        numerical_metrics: dict[str, list[float]],
+        categorical_metrics: dict[str, list[int]],
+    ) -> dict[str, Any]:
+        """Score the latest reconstruction window from parallel request series.
+
+        The series are treated as parallel samples on a shared, end-aligned grid
+        (most recent last) and scored through the same windowing the threshold was
+        calibrated with. See :meth:`score_reconstruction`.
+
+        Args:
+            numerical_metrics: Dict of numerical metric time series.
+            categorical_metrics: Dict of categorical metric time series.
+
+        Returns:
+            The score dict (see :meth:`score_reconstruction`).
+        """
+        return self.score_reconstruction(_frame_from_series(numerical_metrics, categorical_metrics))
+
+    def score_reconstruction(self, df_long: pd.DataFrame) -> dict[str, Any]:
+        """Score the most recent reconstruction window of a long-format frame.
+
+        Windows the frame in the model's feature order with its stored
+        normalization -- the exact path ``scripts/bake_serving_threshold.py`` and
+        the incident-validation harness use -- and scores the most recent full
+        window against the persisted healthy threshold. A frame with fewer than
+        seq_len distinct timestamps cannot form a full window, so it is reported as
+        not-scored (``reconstruction_error`` and ``ratio`` None) rather than scored
+        on a front-padded window; this matches the bake path, which drops
+        sub-seq_len captures, and avoids a spurious anomaly at cold start. A window
+        that carries no numerical data at all (zero coverage) is likewise reported
+        not-scored, so a numerical collection outage is not masked as a healthy
+        all-neutral score. When no threshold is configured the error is still
+        returned with a null ratio.
+
+        Args:
+            df_long: Canonical long-format metrics for a single resource.
+
+        Returns:
+            Dict with reconstruction_error, threshold, ratio, is_anomaly, severity,
+            and coverage. reconstruction_error and ratio are None when no full
+            window is available. coverage is measured over the scored window.
+        """
+        with tracer.start_as_current_span("score_reconstruction") as span:
+            seq_len = int(self.config["seq_len"])
+            threshold = self.recon_threshold
+
+            error, coverage = self._latest_window(df_long, seq_len)
+            span.set_attribute("reconstruction.coverage", coverage)
+            if error is None:
+                span.set_attribute("reconstruction.scored", False)
+                return {
+                    "reconstruction_error": None,
+                    "threshold": threshold,
+                    "ratio": None,
+                    "is_anomaly": False,
+                    "severity": 1,
+                    "coverage": coverage,
+                }
+
+            if threshold is not None and threshold > 0:
+                ratio: float | None = error / threshold
+                is_anomaly = ratio > 1.0
+                severity = _severity_from_ratio(ratio)
+            else:
+                ratio = None
+                is_anomaly = False
+                severity = 1
+
+            span.set_attribute("reconstruction.error", error)
+            span.set_attribute("reconstruction.is_anomaly", is_anomaly)
+            return {
+                "reconstruction_error": error,
+                "threshold": threshold,
+                "ratio": ratio,
+                "is_anomaly": is_anomaly,
+                "severity": severity,
+                "coverage": coverage,
+            }
+
+    def _latest_window(self, df_long: pd.DataFrame, seq_len: int) -> tuple[float | None, float]:
+        """Score the most recent full window; return (error, coverage).
+
+        Trims to the most recent seq_len distinct timestamps so the cost is one
+        window regardless of the lookback, and measures coverage over that scored
+        window (not the whole frame, so a feature that stopped reporting before the
+        window is counted as absent). Returns error None -- not scored -- when there
+        are fewer than seq_len distinct timestamps or the window carries no
+        numerical data at all (zero coverage), rather than scoring an all-neutral
+        window that would read as healthy and mask a collection outage.
+        """
+        if df_long.empty:
+            return None, 0.0
+        ts = pd.to_datetime(df_long["timestamp"], utc=True)
+        distinct = np.sort(ts.unique())
+        if distinct.size < seq_len:
+            return None, self._numerical_coverage(df_long)
+        recent = set(distinct[-seq_len:])
+        df_recent = df_long[ts.isin(recent)]
+
+        coverage = self._numerical_coverage(df_recent)
+        if coverage == 0.0:
+            # No numerical feature was observed in the scored window; an all-neutral
+            # window would score as healthy, so report not-scored instead.
+            return None, 0.0
+
+        windows = build_windows(
+            df_recent,
+            numerical_features=self.numerical_features,
+            categorical_features=self.categorical_features,
+            normalization=self.normalization,
+            cat_normalization=self.cat_normalization,
+            seq_len=seq_len,
+            step=1,
+        )
+        if windows.x_num.shape[0] == 0:
+            return None, coverage
+        errors = reconstruction_errors(self.model, windows.x_num, windows.x_cat, self.device)
+        # The most recent window is the one whose last sample is latest.
+        latest = int(np.argmax(windows.end_times.values))
+        return float(errors[latest]), coverage
+
+    def _numerical_coverage(self, df_long: pd.DataFrame) -> float:
+        """Fraction of the model's numerical features present (any non-null) in the frame."""
+        if not self.numerical_features:
+            return 1.0
+        present_names = set(df_long.loc[df_long["value"].notna(), "metric_name"].unique())
+        present = sum(1 for name in self.numerical_features if name in present_names)
+        return present / len(self.numerical_features)

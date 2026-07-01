@@ -7,7 +7,7 @@ A thin layer over a :class:`~scry.data.sources.base.DataSource` that returns
 pandas DataFrames in the canonical schema, ready for feature engineering.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import pandas as pd
@@ -175,3 +175,38 @@ class DataFetcher:
             "warnings": warnings,
             "ready": len(warnings) == 0,
         }
+
+
+async def fetch_full_capture(
+    uri: str,
+    *,
+    profile: str | None = None,
+    data_format: str | None = None,
+) -> pd.DataFrame:
+    """Fetch an entire object-store capture as a canonical long-format DataFrame.
+
+    The time range is derived from the source summary so the whole capture is
+    returned regardless of wall-clock time. Used by the incident-validation
+    harness and the serving-threshold bake utility.
+
+    Args:
+        uri: Object-store URI or local path for the capture.
+        profile: Optional feature profile to filter metric names.
+        data_format: Optional explicit file format override (``parquet``/``csv``).
+
+    Returns:
+        Canonical long-format metrics for the full capture.
+
+    Raises:
+        ValueError: If the capture has no readable timestamp range.
+    """
+    fetcher = DataFetcher.from_object_store(uri, data_format=data_format)
+    summary = await fetcher.get_data_summary()
+    earliest = pd.to_datetime(summary["earliest_timestamp"], utc=True)
+    latest = pd.to_datetime(summary["latest_timestamp"], utc=True)
+    if pd.isna(earliest) or pd.isna(latest):
+        raise ValueError(f"Capture {uri} has no readable timestamp range.")
+    # get_metrics_dataframe is [start, end); add a margin so the last sample is included.
+    start: datetime = earliest.to_pydatetime()
+    end: datetime = latest.to_pydatetime() + timedelta(seconds=1)
+    return await fetcher.get_metrics_dataframe(start, end, profile=profile)

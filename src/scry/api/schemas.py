@@ -137,6 +137,9 @@ class DetailedHealthResponse(BaseModel):
     model_path: str = Field(..., description="Path to model file")
     datasource: str | None = Field(None, description="Configured data source descriptor")
     chronos_loaded: bool = Field(..., description="Chronos model loaded")
+    recon_threshold: float | None = Field(
+        None, description="Configured healthy reconstruction threshold, if any"
+    )
     uptime_seconds: float = Field(..., description="Seconds since API start")
 
 
@@ -291,3 +294,64 @@ class ForecastResponse(BaseModel):
     resource_id: str = Field(..., description="Resource identifier")
     forecasts: list[MetricForecast] = Field(..., description="Per-metric forecasts")
     model_id: str = Field(..., description="Model used for forecasting")
+
+
+# -- Reconstruction anomaly schemas --
+
+
+class ReconstructionRequest(BaseModel):
+    """Request schema for the reconstruction-anomaly score.
+
+    Attributes:
+        resource_id: Identifier for the infrastructure resource.
+        numerical_metrics: Dict mapping metric names to time series values.
+        categorical_metrics: Dict mapping metric names to time series values (0/1).
+            Optional so purely-numerical models can be scored.
+    """
+
+    resource_id: str = Field(..., min_length=1, description="Resource identifier")
+    numerical_metrics: dict[str, list[float]] = Field(
+        ..., min_length=1, description="Numerical metric time series"
+    )
+    categorical_metrics: dict[str, list[int]] = Field(
+        default_factory=dict, description="Categorical metric time series (0/1 values)"
+    )
+
+    @field_validator("numerical_metrics")
+    @classmethod
+    def validate_numerical_not_empty(cls, v: dict) -> dict:
+        """Ensure numerical_metrics is not empty."""
+        if not v:
+            raise ValueError("numerical_metrics cannot be empty")
+        return v
+
+
+class ReconstructionResponse(BaseModel):
+    """Response schema for the reconstruction-anomaly score.
+
+    Attributes:
+        resource_id: Identifier for the infrastructure resource.
+        reconstruction_error: Per-window numerical reconstruction MSE (from the latent mean);
+            None when the window was too short to score.
+        threshold: Healthy reconstruction threshold, or None when unconfigured.
+        ratio: reconstruction_error / threshold, or None when unconfigured.
+        is_anomaly: True when the ratio exceeds 1 (error above the healthy threshold).
+        severity: Severity band (1 low .. 4 critical) derived from the ratio.
+        coverage: Fraction of the model's numerical features present in the input.
+        timestamp: UTC ISO8601 time of scoring.
+    """
+
+    resource_id: str = Field(..., description="Resource identifier")
+    reconstruction_error: float | None = Field(
+        None, ge=0.0, description="Per-window numerical reconstruction MSE; None when not scored"
+    )
+    threshold: float | None = Field(None, description="Healthy reconstruction threshold")
+    ratio: float | None = Field(
+        None, description="reconstruction_error / threshold; None when no threshold is configured"
+    )
+    is_anomaly: bool = Field(..., description="True when the ratio exceeds 1")
+    severity: int = Field(..., ge=1, le=4, description="Severity band (1 low .. 4 critical)")
+    coverage: float = Field(
+        ..., ge=0.0, le=1.0, description="Fraction of model numerical features present"
+    )
+    timestamp: str = Field(..., description="UTC ISO8601 time of scoring")

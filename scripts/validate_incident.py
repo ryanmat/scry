@@ -30,36 +30,18 @@ import asyncio
 import json
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
-import torch
 
-from scry.data.feature_engineering import (
-    create_dual_windows,
-    pivot_metrics,
-    set_active_profile,
-)
-from scry.data.fetcher import DataFetcher
-from scry.model.xdec import TemporalXDEC
+from scry.data.feature_engineering import set_active_profile
+from scry.data.fetcher import fetch_full_capture
+from scry.data.windowing import WindowSet, build_windows
+from scry.model.checkpoint import Keeper, load_keeper
+from scry.model.reconstruction import reconstruction_errors, time_split
 from scry.utils.config import get_config
-
-
-@dataclass
-class Keeper:
-    """A loaded keeper model plus the schema and normalization it was trained with."""
-
-    model: TemporalXDEC
-    device: str
-    config: dict[str, Any]
-    normalization: dict[str, Any]
-    cat_normalization: dict[str, Any] | None
-    numerical_features: list[str]
-    categorical_features: list[str]
-    profile: str | None
 
 
 @dataclass
@@ -70,98 +52,6 @@ class Incident:
     type: str
     start: pd.Timestamp
     end: pd.Timestamp
-
-
-@dataclass
-class WindowSet:
-    """Normalized windows ready for scoring, with their resource and end-time labels."""
-
-    x_num: torch.Tensor
-    x_cat: torch.Tensor
-    resource_ids: np.ndarray
-    end_times: pd.DatetimeIndex
-
-
-def _detect_device() -> str:
-    """Detect the best available torch device."""
-    if torch.cuda.is_available():
-        return "cuda"
-    if torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
-
-
-def load_keeper(model_path: str) -> Keeper:
-    """Load the keeper checkpoint and reconstruct the model.
-
-    Mirrors the predictor's load path: reconstruct ``TemporalXDEC`` from the saved
-    config, load the weights, and carry the stored normalization and feature
-    schema so incident windows can be aligned and scaled exactly as in training.
-
-    Args:
-        model_path: Path to the saved checkpoint.
-
-    Returns:
-        A populated :class:`Keeper`.
-
-    Raises:
-        FileNotFoundError: If the checkpoint does not exist.
-        ValueError: If the checkpoint has no usable feature schema.
-    """
-    path = Path(model_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Model not found: {model_path}")
-
-    device = _detect_device()
-    checkpoint = torch.load(path, map_location=device, weights_only=False)
-
-    config = checkpoint["config"]
-    normalization = checkpoint.get("normalization") or {"mean": None, "std": None}
-    cat_normalization = checkpoint.get("categorical_normalization")
-
-    schema = checkpoint.get("feature_schema")
-    if not schema or "numerical" not in schema or "categorical" not in schema:
-        raise ValueError(
-            "Model checkpoint has no feature_schema; incident windows cannot be "
-            "aligned by name. Retrain with the current scripts/train_model.py."
-        )
-    numerical_features = [str(x) for x in schema["numerical"]]
-    categorical_features = [str(x) for x in schema["categorical"]]
-
-    if len(numerical_features) != config["num_numerical"]:
-        raise ValueError(
-            f"feature_schema numerical count ({len(numerical_features)}) does not "
-            f"match model num_numerical ({config['num_numerical']}). Retrain the model."
-        )
-    if len(categorical_features) != config["num_categorical"]:
-        raise ValueError(
-            f"feature_schema categorical count ({len(categorical_features)}) does not "
-            f"match model num_categorical ({config['num_categorical']}). Retrain the model."
-        )
-
-    model = TemporalXDEC(
-        num_numerical=config["num_numerical"],
-        num_categorical=config["num_categorical"],
-        seq_len=config["seq_len"],
-        num_hidden=config["num_hidden"],
-        cat_hidden=config["cat_hidden"],
-        latent_dim=config["latent_dim"],
-        n_clusters=config["n_clusters"],
-    )
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.to(device)
-    model.eval()
-
-    return Keeper(
-        model=model,
-        device=device,
-        config=config,
-        normalization=normalization,
-        cat_normalization=cat_normalization,
-        numerical_features=numerical_features,
-        categorical_features=categorical_features,
-        profile=schema.get("profile"),
-    )
 
 
 def load_incidents(labels_path: str) -> list[Incident]:
@@ -195,229 +85,6 @@ def load_incidents(labels_path: str) -> list[Incident]:
             )
         )
     return incidents
-
-
-async def _fetch_long(
-    data_uri: str,
-    profile: str | None,
-    data_format: str | None,
-) -> pd.DataFrame:
-    """Fetch the full capture as a canonical long-format DataFrame.
-
-    The time range is derived from the source summary so the entire capture is
-    windowed regardless of wall-clock time.
-    """
-    fetcher = DataFetcher.from_object_store(data_uri, data_format=data_format)
-    summary = await fetcher.get_data_summary()
-    earliest = pd.to_datetime(summary["earliest_timestamp"], utc=True)
-    latest = pd.to_datetime(summary["latest_timestamp"], utc=True)
-    if pd.isna(earliest) or pd.isna(latest):
-        raise ValueError(f"Capture {data_uri} has no readable timestamp range.")
-    # fetch_metrics is [start, end); add a margin so the last sample is included.
-    start: datetime = earliest.to_pydatetime()
-    end: datetime = latest.to_pydatetime() + timedelta(seconds=1)
-    return await fetcher.get_metrics_dataframe(start, end, profile=profile)
-
-
-def _align_frames(
-    df_long: pd.DataFrame,
-    numerical_features: list[str],
-    categorical_features: list[str],
-) -> tuple[pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray]:
-    """Pivot the long capture and align columns to the model's feature order.
-
-    Features the model expects but the capture lacks are inserted as all-NaN
-    columns so the window tensors keep the model's shape and column order. The
-    returned masks flag those absent numerical and categorical features so they
-    can be mapped to the neutral normalized value (0) after scaling, mirroring
-    the predictor.
-
-    Args:
-        df_long: Canonical long-format metrics.
-        numerical_features: Model numerical features, in model order.
-        categorical_features: Model categorical features, in model order.
-
-    Returns:
-        Tuple of (df_num, df_cat, absent_numerical_mask, absent_categorical_mask).
-    """
-    pivoted = pivot_metrics(df_long)
-
-    df_num = pivoted[["resource_id", "timestamp"]].copy()
-    absent_num = np.zeros(len(numerical_features), dtype=bool)
-    for i, name in enumerate(numerical_features):
-        if name in pivoted.columns:
-            df_num[name] = pivoted[name]
-        else:
-            df_num[name] = np.nan
-            absent_num[i] = True
-
-    df_cat = pivoted[["resource_id", "timestamp"]].copy()
-    absent_cat = np.zeros(len(categorical_features), dtype=bool)
-    for i, name in enumerate(categorical_features):
-        if name in pivoted.columns:
-            df_cat[name] = pivoted[name]
-        else:
-            df_cat[name] = np.nan
-            absent_cat[i] = True
-
-    return df_num, df_cat, absent_num, absent_cat
-
-
-def _normalize_numerical(
-    windows: np.ndarray,
-    normalization: dict[str, Any],
-    absent: np.ndarray,
-) -> np.ndarray:
-    """Apply the checkpoint's stored z-score normalization to numerical windows.
-
-    NaNs are filled forward then backward then with zero (the training rule), the
-    stored per-feature mean/std are applied, and features the capture never
-    supplied are set to the neutral normalized value (0).
-
-    Args:
-        windows: Raw numerical windows (n, seq, n_num).
-        normalization: Stored ``{mean, std}`` arrays from the checkpoint.
-        absent: Boolean mask of features missing from the capture.
-
-    Returns:
-        Normalized windows.
-    """
-    out = windows.astype(np.float32).copy()
-    for i in range(out.shape[0]):
-        for j in range(out.shape[2]):
-            series = pd.Series(out[i, :, j]).ffill().bfill().fillna(0.0)
-            out[i, :, j] = series.to_numpy(dtype=np.float32)
-
-    if normalization.get("mean") is not None:
-        mean = np.asarray(normalization["mean"], dtype=np.float32)
-        std = np.asarray(normalization["std"], dtype=np.float32)
-        std = np.where(std == 0, 1.0, std)
-        out = (out - mean) / std
-
-    if absent.any():
-        out[:, :, absent] = 0.0
-    return out
-
-
-def _normalize_categorical(
-    windows: np.ndarray,
-    cat_normalization: dict[str, Any] | None,
-    absent: np.ndarray,
-) -> np.ndarray:
-    """Apply the checkpoint's stored min-max encoding to categorical windows.
-
-    Mirrors :func:`encode_categorical` / the predictor: NaNs become 0, each
-    feature is scaled by its stored ``[min, max]``, and a degenerate range falls
-    back to 1.0 when the training value was positive else 0.0. Features the
-    capture never supplied are then set to the neutral value 0.0, matching the
-    predictor, which never scales an absent categorical.
-
-    Args:
-        windows: Raw categorical windows (n, seq, n_cat).
-        cat_normalization: Stored ``{min, max}`` arrays, or None.
-        absent: Boolean mask of categorical features missing from the capture.
-
-    Returns:
-        Encoded windows in [0, 1].
-    """
-    out = np.nan_to_num(windows.astype(np.float32), nan=0.0)
-    if cat_normalization is not None:
-        cat_min = np.asarray(cat_normalization["min"], dtype=np.float32)
-        cat_max = np.asarray(cat_normalization["max"], dtype=np.float32)
-        for j in range(out.shape[2]):
-            lo, hi = cat_min[j], cat_max[j]
-            if hi > lo:
-                out[:, :, j] = np.clip((out[:, :, j] - lo) / (hi - lo), 0.0, 1.0)
-            else:
-                out[:, :, j] = 1.0 if hi > 0 else 0.0
-
-    if absent.any():
-        out[:, :, absent] = 0.0
-    return out
-
-
-def build_windows(
-    df_long: pd.DataFrame,
-    keeper: Keeper,
-    seq_len: int,
-    step: int,
-) -> WindowSet:
-    """Window a capture in model order and normalize with the stored parameters.
-
-    Args:
-        df_long: Canonical long-format metrics for the capture.
-        keeper: The loaded keeper model and its schema/normalization.
-        seq_len: Window length (the model's sequence length).
-        step: Sliding-window step.
-
-    Returns:
-        A :class:`WindowSet` of normalized tensors with labels, possibly empty.
-    """
-    df_num, df_cat, absent_num, absent_cat = _align_frames(
-        df_long, keeper.numerical_features, keeper.categorical_features
-    )
-    num_windows, cat_windows, labels = create_dual_windows(
-        df_num, df_cat, window_size=seq_len, step=step
-    )
-
-    if num_windows.shape[0] == 0:
-        empty_num = torch.zeros((0, seq_len, len(keeper.numerical_features)), dtype=torch.float32)
-        empty_cat = torch.zeros((0, seq_len, len(keeper.categorical_features)), dtype=torch.float32)
-        return WindowSet(
-            x_num=empty_num,
-            x_cat=empty_cat,
-            resource_ids=np.zeros(0, dtype=object),
-            end_times=pd.DatetimeIndex([], tz="UTC"),
-        )
-
-    norm_num = _normalize_numerical(num_windows, keeper.normalization, absent_num)
-    norm_cat = _normalize_categorical(cat_windows, keeper.cat_normalization, absent_cat)
-
-    end_times = pd.to_datetime(labels[:, 1], utc=True)
-    return WindowSet(
-        x_num=torch.tensor(norm_num, dtype=torch.float32),
-        x_cat=torch.tensor(norm_cat, dtype=torch.float32),
-        resource_ids=labels[:, 0].astype(object),
-        end_times=pd.DatetimeIndex(end_times),
-    )
-
-
-def reconstruction_errors(
-    model: TemporalXDEC,
-    x_num: torch.Tensor,
-    x_cat: torch.Tensor,
-    device: str,
-    chunk_size: int = 512,
-) -> np.ndarray:
-    """Per-window numerical reconstruction error from the deterministic latent mean.
-
-    Encodes each window, takes the latent mean ``mu`` (no sampling), decodes, and
-    returns the mean squared error between the normalized numerical input and its
-    reconstruction over (seq_len, num_features).
-
-    Args:
-        model: The keeper model.
-        x_num: Normalized numerical windows (n, seq, n_num).
-        x_cat: Encoded categorical windows (n, seq, n_cat).
-        device: Torch device string.
-        chunk_size: Batch size for inference.
-
-    Returns:
-        Array of shape (n,) with one error per window.
-    """
-    errors: list[np.ndarray] = []
-    model.eval()
-    with torch.no_grad():
-        for start in range(0, x_num.shape[0], chunk_size):
-            xn = x_num[start : start + chunk_size].to(device)
-            xc = x_cat[start : start + chunk_size].to(device)
-            _, mu, _ = model.xvae.encode(xn, xc)
-            x_num_recon, _ = model.xvae.decode(mu)
-            err = ((xn - x_num_recon) ** 2).mean(dim=(1, 2))
-            errors.append(err.cpu().numpy())
-    if not errors:
-        return np.zeros(0, dtype=np.float64)
-    return np.concatenate(errors).astype(np.float64)
 
 
 def _anomaly_runs(flags: np.ndarray, sustain: int) -> list[tuple[int, int]]:
@@ -560,32 +227,6 @@ def evaluate_incidents(
     return results
 
 
-def _time_split(
-    errors: np.ndarray, end_times: pd.DatetimeIndex, gap: int = 0
-) -> tuple[np.ndarray, np.ndarray]:
-    """Split errors into an earlier (fit) and later (eval) half by end-time.
-
-    A ``gap`` of windows is dropped between the halves so the eval windows share
-    no raw samples with the fit windows (sliding windows overlap), keeping the
-    false-positive rate genuinely out-of-sample.
-
-    Args:
-        errors: Per-window errors.
-        end_times: Matching per-window end timestamps.
-        gap: Number of windows to drop between the fit and eval halves.
-
-    Returns:
-        Tuple of (earlier_half, later_half). The later half is empty when there
-        are too few windows to leave any after the gap.
-    """
-    if errors.size < 2:
-        return errors, np.zeros(0, dtype=errors.dtype)
-    order = np.argsort(end_times.values, kind="stable")
-    ordered = errors[order]
-    mid = ordered.size // 2
-    return ordered[:mid], ordered[mid + gap :]
-
-
 def compute_threshold(
     errors: np.ndarray,
     end_times: pd.DatetimeIndex,
@@ -640,13 +281,28 @@ def compute_threshold(
                 "windows end before the earliest incident start. Provide a "
                 "--reference healthy capture instead."
             )
-        fit, eval_ = _time_split(pre_errors, pre_times, gap=gap)
+        fit, eval_ = time_split(pre_errors, pre_times, gap=gap)
 
     if fit.size == 0:
         raise ValueError("No healthy windows available to fit the threshold.")
 
     threshold = float(np.quantile(fit, quantile))
     return threshold, source, fit, eval_
+
+
+def _windows_for_keeper(
+    df_long: pd.DataFrame, keeper: Keeper, seq_len: int, step: int
+) -> WindowSet:
+    """Window a capture for a loaded keeper, passing its schema and stored normalization."""
+    return build_windows(
+        df_long,
+        numerical_features=keeper.numerical_features,
+        categorical_features=keeper.categorical_features,
+        normalization=keeper.normalization,
+        cat_normalization=keeper.cat_normalization,
+        seq_len=seq_len,
+        step=step,
+    )
 
 
 def analyze(
@@ -691,8 +347,8 @@ def analyze(
     seq_len = int(keeper.config["seq_len"])
     step = int(get_config().window_step)
 
-    df_long = asyncio.run(_fetch_long(data, profile, data_format))
-    windows = build_windows(df_long, keeper, seq_len, step)
+    df_long = asyncio.run(fetch_full_capture(data, profile=profile, data_format=data_format))
+    windows = _windows_for_keeper(df_long, keeper, seq_len, step)
     if windows.x_num.shape[0] == 0:
         raise ValueError(
             f"Capture {data} produced no windows for profile '{profile}'. "
@@ -702,8 +358,8 @@ def analyze(
 
     reference_errors: np.ndarray | None = None
     if reference is not None:
-        ref_long = asyncio.run(_fetch_long(reference, profile, data_format))
-        ref_windows = build_windows(ref_long, keeper, seq_len, step)
+        ref_long = asyncio.run(fetch_full_capture(reference, profile=profile, data_format=data_format))
+        ref_windows = _windows_for_keeper(ref_long, keeper, seq_len, step)
         if ref_windows.x_num.shape[0] == 0:
             raise ValueError(
                 f"Reference capture {reference} produced no windows for profile '{profile}'."
@@ -865,8 +521,8 @@ def main(argv: list[str] | None = None) -> int:
         set_active_profile(args.profile)
         seq_len = int(keeper.config["seq_len"])
         step = int(get_config().window_step)
-        df_long = asyncio.run(_fetch_long(args.data, args.profile, args.format))
-        windows = build_windows(df_long, keeper, seq_len, step)
+        df_long = asyncio.run(fetch_full_capture(args.data, profile=args.profile, data_format=args.format))
+        windows = _windows_for_keeper(df_long, keeper, seq_len, step)
         errors = reconstruction_errors(
             keeper.model, windows.x_num, windows.x_cat, keeper.device
         )
