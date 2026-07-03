@@ -15,6 +15,8 @@ Scry predicts infrastructure failure states from a stream of metrics. It sorts e
 Currently being used for LogicMonitor metric predictions.
 The default path reads Parquet or CSV from local files or object storage. Everything normalizes to one canonical long-format table, so any metric source works once it is in that shape.
 
+Shout out to my MTG heads.
+
 <table>
 <tr><td><b>The X-DEC model</b></td><td>A dual-encoder temporal VAE plus deep embedded clustering, pure PyTorch, no cloud dependencies. Trains on your own windowed metrics from scratch.</td></tr>
 <tr><td><b>Five operational states</b></td><td>Every resource is sorted into NORMAL, PRE_SCALE, PRE_FAILURE, ACTIVE_DEGRADATION, or ANOMALY, each mapped to a recommended action and priority.</td></tr>
