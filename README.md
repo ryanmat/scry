@@ -10,7 +10,7 @@
 
 </div>
 
-**Scry predicts infrastructure failure states from a stream of metrics.** It sorts each resource into one of five operational states, recommends an action for each, and forecasts where the metrics are headed. It is data-source agnostic and runs offline. No trained weights ship.
+Scry predicts infrastructure failure states from a stream of metrics. It sorts each resource into one of five operational states, recommends an action for each, and forecasts where the metrics are headed. It is data-source agnostic and runs offline. No trained weights ship.
 
 Currently being used for LogicMonitor metric predictions.
 The default path reads Parquet or CSV from local files or object storage. Everything normalizes to one canonical long-format table, so any metric source works once it is in that shape.
