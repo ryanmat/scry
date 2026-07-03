@@ -1,5 +1,7 @@
 <div align="center">
 
+<img width="265" height="370" alt="scry" src="https://github.com/user-attachments/assets/b6425d21-c6f2-4046-b572-7443ac4dfd9d" />
+
 <img src="assets/banner.svg" alt="scry" width="400">
 
 [![CI](https://github.com/ryanmat/scry/actions/workflows/ci.yml/badge.svg)](https://github.com/ryanmat/scry/actions/workflows/ci.yml)
