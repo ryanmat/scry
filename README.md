@@ -2,7 +2,7 @@
 
 <img width="265" height="370" alt="scry" src="https://github.com/user-attachments/assets/b6425d21-c6f2-4046-b572-7443ac4dfd9d" />
 
-# Scry
+# scry ml
 [![CI](https://github.com/ryanmat/scry/actions/workflows/ci.yml/badge.svg)](https://github.com/ryanmat/scry/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/scryml.svg)](https://pypi.org/project/scryml/)
 [![Python](https://img.shields.io/pypi/pyversions/scryml.svg)](https://pypi.org/project/scryml/)
@@ -10,9 +10,10 @@
 
 </div>
 
-**Scry predicts infrastructure failure states from a stream of metrics.** It sorts each resource into one of five operational states, recommends an action for each, and forecasts where the metrics are headed. It is data-source agnostic and runs offline. You bring your own metrics, train your own model, and serve predictions over a small HTTP API. No trained weights ship.
+**Scry predicts infrastructure failure states from a stream of metrics.** It sorts each resource into one of five operational states, recommends an action for each, and forecasts where the metrics are headed. It is data-source agnostic and runs offline. No trained weights ship.
 
-LogicMonitor is one supported source, not the anchor. The default path reads Parquet or CSV from local files or object storage. Everything normalizes to one canonical long-format table, so any metric source works once it is in that shape.
+Currently being used for LogicMonitor metric predictions.
+The default path reads Parquet or CSV from local files or object storage. Everything normalizes to one canonical long-format table, so any metric source works once it is in that shape.
 
 <table>
 <tr><td><b>The X-DEC model</b></td><td>A dual-encoder temporal VAE plus deep embedded clustering, pure PyTorch, no cloud dependencies. Trains on your own windowed metrics from scratch.</td></tr>
