@@ -37,12 +37,16 @@ class TestFeatureLists:
         assert set(ALL_FEATURES) == set(NUMERICAL_FEATURES + CATEGORICAL_FEATURES)
 
     def test_numerical_features_are_continuous_metrics(self) -> None:
-        """NUMERICAL_FEATURES should contain expected continuous metrics."""
+        """NUMERICAL_FEATURES should contain gauges and exclude since-boot counters."""
         from scry.data.feature_engineering import NUMERICAL_FEATURES
 
-        expected = ["cpuUsageNanoCores", "memoryUsageBytes", "networkRxBytes"]
+        expected = ["cpuUsageNanoCores", "memoryUsageBytes", "memoryWorkingSetBytes"]
         for metric in expected:
             assert metric in NUMERICAL_FEATURES
+        # Monotone since-boot counters drift out of a fixed normalization
+        # range and must not be model features.
+        for counter in ["networkRxBytes", "networkTxBytes", "cpuUsageCoreNanoSeconds"]:
+            assert counter not in NUMERICAL_FEATURES
 
     def test_categorical_features_are_discrete_metrics(self) -> None:
         """CATEGORICAL_FEATURES should contain expected discrete metrics."""

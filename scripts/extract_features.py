@@ -19,9 +19,10 @@ import re
 import sys
 from datetime import datetime, timedelta, timezone
 
-from scry.data.feature_engineering import set_active_profile
+from scry.data.feature_engineering import get_numerical_features, set_active_profile
 from scry.data.fetcher import DataFetcher
 from scry.data.pipeline import XDECFeaturePipeline
+from scry.data.quality import monotone_feature_warnings
 from scry.utils.config import get_config
 
 _REL_RE = re.compile(r"^(\d+)([smhdw])$")
@@ -55,13 +56,17 @@ async def _extract(args: argparse.Namespace) -> tuple[XDECFeaturePipeline, dict]
     fetcher = DataFetcher.from_object_store(args.data, data_format=args.format)
     pipeline = XDECFeaturePipeline(fetcher, config)
     raw = await pipeline.extract(start, end, profile=args.profile)
+    # A cumulative counter trained into the model drifts out of the fixed
+    # normalization range with wall-clock time; warn before it is baked in.
+    # Judge only the features the active profile will train on, not every
+    # metric the source happens to hold.
+    for warning in monotone_feature_warnings(raw, features=get_numerical_features()):
+        print(f"warning: {warning}", file=sys.stderr)
     return pipeline, pipeline.transform(raw)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Extract X-DEC training data from a data source."
-    )
+    parser = argparse.ArgumentParser(description="Extract X-DEC training data from a data source.")
     src = parser.add_argument_group("data source")
     src.add_argument("--data", help="Object-store URI or local path/glob (Parquet or CSV).")
     src.add_argument(
@@ -74,9 +79,7 @@ def main() -> int:
     parser.add_argument(
         "--profile", default=None, help="Feature profile (see config/features.yaml)."
     )
-    parser.add_argument(
-        "--output", default="data/training_data.npz", help="Output .npz path."
-    )
+    parser.add_argument("--output", default="data/training_data.npz", help="Output .npz path.")
     args = parser.parse_args()
 
     if not args.data:

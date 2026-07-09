@@ -28,6 +28,17 @@ not rely on them as the signal; they are a bonus if your profile includes them.
 Target a single node. Keep a rollback ready (delete the pod, remove the fill file,
 uncordon). Record the UTC start before you induce and the UTC end after recovery.
 
+Two sizing rules before you induce:
+
+- **Duration**: the validation's detection rule requires a *sustained* run --
+  `sustain` consecutive windows over threshold. At the defaults (sustain 3, the
+  configured window step and length) the incident must stay elevated for roughly
+  60-90 minutes; a 30-minute burst can spike individual windows over threshold
+  without ever forming a sustained run.
+- **Placement**: never stress the node hosting the monitoring collector (for LM
+  Container: the argus/collector, collectorset-controller, and kube-state-metrics
+  pods). Starving the collector distorts every node's metrics in the capture.
+
 ### Tier 1 (safe): CPU + memory stress
 
 A `stress-ng` pod pinned to one node moves `cpuUsageNanoCores`, `memoryUsageBytes`,
@@ -44,10 +55,18 @@ spec:
   containers:
     - name: stress
       image: ghcr.io/colinianking/stress-ng
-      args: ["--cpu", "4", "--vm", "2", "--vm-bytes", "2G", "--timeout", "1800s"]
+      args: ["--cpu", "3", "--vm", "1", "--vm-bytes", "1G", "--timeout", "5400s"]
       resources:
-        limits: { cpu: "4", memory: "3Gi" }
+        requests: { cpu: "500m", memory: "512Mi" }
+        limits: { cpu: "3", memory: "2Gi" }
 ```
+
+Keep the requests small: a busy cluster reserves most of a node's allocatable
+CPU and memory, and the kubelet rejects a pod whose requests do not fit
+(`OutOfcpu`/`OutOfmemory`) -- check `kubectl describe node <node>` under
+"Allocated resources" first. The limits, not the requests, set the stress
+ceiling. Keep the total `--vm` bytes under the memory limit or the stressor
+OOM-kills itself.
 
 Rollback: `kubectl delete pod scry-stress`.
 
