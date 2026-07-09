@@ -231,6 +231,9 @@ def create_app(model_path: str | None = None) -> FastAPI:
             datasource=_datasource_descriptor(),
             chronos_loaded=app.state.forecaster.is_loaded,
             recon_threshold=recon_threshold,
+            drift_configured=hasattr(app.state, "drift_detector"),
+            forecast_anomaly_configured=hasattr(app.state, "anomaly_detector"),
+            accuracy_configured=hasattr(app.state, "accuracy_tracker"),
             uptime_seconds=round(uptime, 2),
         )
 
@@ -468,13 +471,16 @@ def create_app(model_path: str | None = None) -> FastAPI:
 
     @app.get("/drift")
     def drift_status() -> dict:
-        """Get current drift detection status (PSI feature drift, ADWIN prediction drift)."""
+        """Get current drift detection status (PSI feature drift, ADWIN prediction drift).
+
+        Raises:
+            HTTPException: 503 until an operator attaches a drift detector to the
+                app state (its companions -- reference_data, current_data,
+                error_stream -- must be attached with it); an unconfigured
+                detector must not read as a healthy no-drift signal.
+        """
         if not hasattr(app.state, "drift_detector"):
-            return {
-                "feature_drift": {"has_drift": False, "message": "No reference data configured"},
-                "prediction_drift": {"has_drift": False, "message": "No error history available"},
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
+            raise HTTPException(status_code=503, detail="Drift detection not configured")
 
         detector = app.state.drift_detector
         return detector.get_drift_status(
@@ -485,16 +491,18 @@ def create_app(model_path: str | None = None) -> FastAPI:
 
     @app.get("/anomaly")
     def anomaly_status() -> dict:
-        """Get current forecast-based anomaly detection status."""
+        """Get current forecast-based anomaly detection status.
+
+        Raises:
+            HTTPException: 503 until an operator attaches a forecast-anomaly
+                detector to the app state (its companions -- last_actuals,
+                last_forecast -- must be attached with it); an unconfigured
+                detector must not read as a healthy zero score. The
+                reconstruction path (/anomaly/reconstruction) serves without
+                this wiring.
+        """
         if not hasattr(app.state, "anomaly_detector"):
-            return {
-                "is_anomaly": False,
-                "anomaly_score": 0.0,
-                "violated_metrics": [],
-                "severity": "low",
-                "metric_count": 0,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
+            raise HTTPException(status_code=503, detail="Forecast-anomaly detection not configured")
 
         detector = app.state.anomaly_detector
         actuals = app.state.last_actuals
@@ -513,23 +521,17 @@ def create_app(model_path: str | None = None) -> FastAPI:
 
     @app.get("/accuracy")
     def accuracy_status() -> dict:
-        """Get forecast accuracy and cluster stability metrics as flat key=value pairs."""
+        """Get forecast accuracy and cluster stability metrics as flat key=value pairs.
+
+        Raises:
+            HTTPException: 503 until an operator attaches an accuracy tracker to
+                the app state; an unconfigured tracker must not fabricate
+                all-zero metrics under an ApiStatus of 1.
+        """
         start_ms = time.monotonic_ns() // 1_000_000
 
         if not hasattr(app.state, "accuracy_tracker"):
-            elapsed = (time.monotonic_ns() // 1_000_000) - start_ms
-            fallback: dict = {}
-            for metric in ["Picp", "Mae", "Mase", "Mpiw"]:
-                for horizon in ["15m", "1h", "4h", "24h"]:
-                    fallback[f"{metric}{horizon}"] = 0.0
-            fallback["TransitionRate"] = 0.0
-            fallback["ConfidenceStd"] = 0.0
-            fallback["DominantClusterPct"] = 0.0
-            fallback["ObservationCount"] = 0
-            fallback["ApiStatus"] = 1
-            fallback["ApiLatencyMs"] = elapsed
-            fallback["timestamp"] = datetime.now(timezone.utc).isoformat()
-            return fallback
+            raise HTTPException(status_code=503, detail="Accuracy tracking not configured")
 
         tracker = app.state.accuracy_tracker
         metrics = tracker.compute_metrics()

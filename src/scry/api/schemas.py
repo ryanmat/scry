@@ -126,6 +126,10 @@ class DetailedHealthResponse(BaseModel):
         model_path: Filesystem path to the model file.
         datasource: Configured data source descriptor, or None if unconfigured.
         chronos_loaded: Whether the Chronos forecasting model is loaded.
+        drift_configured: Whether an operator has attached a drift detector.
+        forecast_anomaly_configured: Whether an operator has attached a
+            forecast-anomaly detector.
+        accuracy_configured: Whether an operator has attached an accuracy tracker.
         uptime_seconds: Seconds since the API started.
     """
 
@@ -139,6 +143,15 @@ class DetailedHealthResponse(BaseModel):
     chronos_loaded: bool = Field(..., description="Chronos model loaded")
     recon_threshold: float | None = Field(
         None, description="Configured healthy reconstruction threshold, if any"
+    )
+    drift_configured: bool = Field(
+        False, description="Drift detector attached; /drift serves 503 until then"
+    )
+    forecast_anomaly_configured: bool = Field(
+        False, description="Forecast-anomaly detector attached; /anomaly serves 503 until then"
+    )
+    accuracy_configured: bool = Field(
+        False, description="Accuracy tracker attached; /accuracy serves 503 until then"
     )
     uptime_seconds: float = Field(..., description="Seconds since API start")
 

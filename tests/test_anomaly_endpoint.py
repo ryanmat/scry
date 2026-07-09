@@ -113,16 +113,26 @@ class TestAnomalyEndpointNoForecaster:
     """Tests for /anomaly when no detector is configured."""
 
     def test_anomaly_endpoint_no_forecaster(self, test_client):
-        """Returns graceful fallback when no anomaly detector configured."""
-        response = test_client.get("/anomaly")
-        assert response.status_code == 200
+        """The shipped default app (no detector attached) serves 503, not a zero score.
 
-        data = response.json()
-        assert data["is_anomaly"] is False
-        assert data["anomaly_score"] == 0.0
-        assert data["violated_metrics"] == []
-        assert data["severity"] == "low"
-        assert "timestamp" in data
+        Runs against plain create_app() with no app.state monkeypatching, so this
+        fails if an unconfigured /anomaly fabricates a healthy score.
+        """
+        response = test_client.get("/anomaly")
+        assert response.status_code == 503
+        assert response.json()["detail"] == "Forecast-anomaly detection not configured"
+
+    def test_health_detailed_reports_forecast_anomaly_unconfigured(self, test_client):
+        """/health/detailed exposes the wiring state without probing /anomaly."""
+        response = test_client.get("/health/detailed")
+        assert response.status_code == 200
+        assert response.json()["forecast_anomaly_configured"] is False
+
+    def test_health_detailed_reports_forecast_anomaly_configured(self, test_client_with_anomaly):
+        """The flag flips once an operator attaches a detector."""
+        response = test_client_with_anomaly.get("/health/detailed")
+        assert response.status_code == 200
+        assert response.json()["forecast_anomaly_configured"] is True
 
 
 class TestAnomalyEndpointWithDetector:

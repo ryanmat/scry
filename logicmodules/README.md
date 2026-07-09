@@ -11,8 +11,8 @@ through LM's normal alerting, with no separate UI.
 |------|------|----------|---------|
 | `datasources/Scry_Anomaly.xml` | DataSource (SCRIPT) | `GET /anomaly/reconstruction/lookup` | Per-resource X-DEC reconstruction anomaly: `AnomalyScore` is the reconstruction error as a ratio of the model's healthy threshold. |
 | `datasources/Scry_Predictive.xml` | DataSource (SCRIPT) | `GET /predict/lookup` | Five-state operational cluster, confidence, priority. Cluster-derived alerts are disabled for the healthy-trained keeper (degenerate clustering); the reconstruction signal is authoritative. |
-| `datasources/Scry_Drift.xml` | DataSource (SCRIPT) | `GET /drift` | Feature/prediction drift status. |
-| `datasources/Scry_Accuracy.xml` | DataSource (SCRIPT) | `GET /accuracy` | Forecast accuracy and cluster-stability metrics. |
+| `datasources/Scry_Drift.xml` | DataSource (SCRIPT) | `GET /drift` | Feature/prediction drift status. Requires operator-wired detectors; the endpoint serves 503 until then, so do not import against an unwired API. |
+| `datasources/Scry_Accuracy.xml` | DataSource (SCRIPT) | `GET /accuracy` | Forecast accuracy and cluster-stability metrics. Requires an operator-wired tracker; the endpoint serves 503 until then, so do not import against an unwired API. |
 | `dashboards/Scry_Predictive_Dashboard.json` | Dashboard | - | Prediction overview. |
 | `dashboards/Scry_ModelHealth_Dashboard.json` | Dashboard | - | Model-health overview. |
 | `propertysources/Scry_Predictive_Props.xml` | PropertySource | - | Discovery: sets Scry device properties. |
@@ -64,7 +64,8 @@ Base URL: `scry.api.url` (for example `https://scry.example.com`).
 | POST | `/anomaly/reconstruction` | Reconstruction score from metrics in the body. |
 | GET | `/anomaly/reconstruction/lookup?resource_id=<id>` | Reconstruction score from the data source. |
 | POST | `/forecast` | Chronos metric forecast (needs the `forecast` extra). |
-| GET | `/drift`, `/anomaly`, `/accuracy`, `/clusters` | Drift, forecast-anomaly, accuracy, cluster definitions. |
+| GET | `/clusters` | Cluster definitions. |
+| GET | `/drift`, `/anomaly`, `/accuracy` | Drift, forecast-anomaly, accuracy. Serve 503 until an operator wires the corresponding detector/tracker into the app state (never a fake-healthy body); `/health/detailed` reports the wiring flags. |
 
 Reconstruction response:
 

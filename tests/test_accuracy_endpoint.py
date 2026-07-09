@@ -1,5 +1,5 @@
 # Description: Tests for /accuracy API endpoint contract.
-# Description: Validates fallback behavior, metric response, and flat key structure.
+# Description: Validates the unconfigured 503 refusal, metric response, and flat key structure.
 
 """Tests for /accuracy API endpoint."""
 
@@ -97,14 +97,27 @@ class TestAccuracyEndpointNoTracker:
     """Tests for /accuracy when no tracker is configured."""
 
     def test_accuracy_endpoint_no_tracker(self, test_client):
-        """Returns graceful fallback when unconfigured."""
-        response = test_client.get("/accuracy")
-        assert response.status_code == 200
+        """The shipped default app (no tracker attached) serves 503, not zero metrics.
 
-        data = response.json()
-        assert data["ApiStatus"] == 1
-        assert data["ObservationCount"] == 0
-        assert "timestamp" in data
+        Runs against plain create_app() with no app.state monkeypatching, so this
+        fails if an unconfigured /accuracy fabricates ApiStatus=1 with all-zero
+        metrics.
+        """
+        response = test_client.get("/accuracy")
+        assert response.status_code == 503
+        assert response.json()["detail"] == "Accuracy tracking not configured"
+
+    def test_health_detailed_reports_accuracy_unconfigured(self, test_client):
+        """/health/detailed exposes the wiring state without probing /accuracy."""
+        response = test_client.get("/health/detailed")
+        assert response.status_code == 200
+        assert response.json()["accuracy_configured"] is False
+
+    def test_health_detailed_reports_accuracy_configured(self, test_client_with_tracker):
+        """The flag flips once an operator attaches a tracker."""
+        response = test_client_with_tracker.get("/health/detailed")
+        assert response.status_code == 200
+        assert response.json()["accuracy_configured"] is True
 
 
 class TestAccuracyEndpointWithTracker:

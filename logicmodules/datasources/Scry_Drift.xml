@@ -13,7 +13,7 @@
       <id></id>
       <name>Scry_Drift</name>
       <displayedas>Scry Drift</displayedas>
-      <description>Monitors feature drift (PSI) and prediction drift (ADWIN) from the Scry API. Alerts when input distributions shift significantly from training data or when prediction error patterns change.</description>
+      <description>Monitors feature drift (PSI) and prediction drift (ADWIN) from the Scry API. Alerts when input distributions shift significantly from training data or when prediction error patterns change. Requires an operator-wired drift detector on the Scry API: /drift serves 503 until one is attached, which this DataSource reads as ApiStatus=0 (API down). Do not import against an unwired API; the reconstruction signal (Scry_Anomaly) needs no such wiring.</description>
       <group>Scry</group>
       <tags></tags>
       <auditVersion></auditVersion>
@@ -290,7 +290,7 @@
           <alertTransitionInterval>0</alertTransitionInterval>
           <alertClearTransitionInterval>0</alertClearTransitionInterval>
           <alertExpr>= 0 error</alertExpr>
-          <alertExprNote>Drift detection API unreachable</alertExprNote>
+          <alertExprNote>Drift API unreachable (connection failure) or not ready (non-200, incl. 503 until an operator wires the drift detector)</alertExprNote>
           <alertSubject></alertSubject>
           <alertBody></alertBody>
           <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>

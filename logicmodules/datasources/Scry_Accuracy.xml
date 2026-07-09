@@ -13,7 +13,7 @@
       <id></id>
       <name>Scry_Accuracy</name>
       <displayedas>Scry Accuracy</displayedas>
-      <description>Collects forecast accuracy (PICP, MAE, MASE, MPIW) and cluster stability metrics from the Scry Predictive API /accuracy endpoint.</description>
+      <description>Collects forecast accuracy (PICP, MAE, MASE, MPIW) and cluster stability metrics from the Scry Predictive API /accuracy endpoint. Requires an operator-wired accuracy tracker on the Scry API: /accuracy serves 503 until one is attached, which this DataSource reads as ApiStatus=0 (API down). Do not import against an unwired API; the reconstruction signal (Scry_Anomaly) needs no such wiring.</description>
       <group>Scry</group>
       <tags></tags>
       <auditVersion></auditVersion>
@@ -662,7 +662,7 @@
           <alertTransitionInterval>0</alertTransitionInterval>
           <alertClearTransitionInterval>0</alertClearTransitionInterval>
           <alertExpr>= 0 error</alertExpr>
-          <alertExprNote>Accuracy API unreachable</alertExprNote>
+          <alertExprNote>Accuracy API unreachable (connection failure) or not ready (non-200, incl. 503 until an operator wires the accuracy tracker)</alertExprNote>
           <alertSubject></alertSubject>
           <alertBody></alertBody>
           <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>

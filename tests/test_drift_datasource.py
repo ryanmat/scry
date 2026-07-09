@@ -100,14 +100,26 @@ class TestDriftEndpointNoReferenceData:
     """Tests for /drift when no reference data is configured."""
 
     def test_drift_endpoint_no_reference_data(self, test_client):
-        """Endpoint returns graceful fallback when no detector configured."""
-        response = test_client.get("/drift")
-        assert response.status_code == 200
+        """The shipped default app (no detector attached) serves 503, not fake-healthy.
 
-        data = response.json()
-        assert data["feature_drift"]["has_drift"] is False
-        assert data["prediction_drift"]["has_drift"] is False
-        assert "timestamp" in data
+        Runs against plain create_app() with no app.state monkeypatching, so this
+        fails if an unconfigured /drift reads as a healthy no-drift signal.
+        """
+        response = test_client.get("/drift")
+        assert response.status_code == 503
+        assert response.json()["detail"] == "Drift detection not configured"
+
+    def test_health_detailed_reports_drift_unconfigured(self, test_client):
+        """/health/detailed exposes the wiring state without probing /drift."""
+        response = test_client.get("/health/detailed")
+        assert response.status_code == 200
+        assert response.json()["drift_configured"] is False
+
+    def test_health_detailed_reports_drift_configured(self, test_client_with_drift):
+        """The flag flips once an operator attaches a detector."""
+        response = test_client_with_drift.get("/health/detailed")
+        assert response.status_code == 200
+        assert response.json()["drift_configured"] is True
 
 
 class TestDriftEndpointWithDetector:
