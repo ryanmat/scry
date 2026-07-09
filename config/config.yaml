@@ -25,6 +25,9 @@ paths:
   data_path: data/training_data.npz
 
 # Feature Configuration
+# Gauges and rates only: since-boot counters (networkRxBytes, networkTxBytes)
+# are excluded because a monotone counter normalized on a fixed training
+# window drifts out of distribution with wall-clock time.
 features:
   numerical:
     - cpuUsagePercent
@@ -33,8 +36,6 @@ features:
     - memoryUsageBytes
     - memoryWorkingSetBytes
     - memoryRssBytes
-    - networkRxBytes
-    - networkTxBytes
     - kubePodContainerStatusRestartsTotal
 
   categorical:

@@ -41,6 +41,7 @@ import pandas as pd
 
 from scry.data.feature_engineering import set_active_profile
 from scry.data.fetcher import fetch_full_capture
+from scry.data.quality import missing_features
 from scry.data.windowing import WindowSet, build_windows
 from scry.model.checkpoint import Keeper, load_keeper
 from scry.model.reconstruction import reconstruction_errors, time_split
@@ -139,11 +140,7 @@ def _select_detection(
     """
     if not spans:
         return None
-    step = (
-        pd.Timedelta(np.median(np.diff(scan_ts.values)))
-        if len(scan_ts) > 1
-        else pd.Timedelta(0)
-    )
+    step = pd.Timedelta(np.median(np.diff(scan_ts.values))) if len(scan_ts) > 1 else pd.Timedelta(0)
     leading = [span for span in spans if span[0] <= onset and span[1] >= onset - step]
     if leading:
         return min(leading, key=lambda span: span[0])[0]
@@ -193,9 +190,7 @@ def evaluate_incidents(
         # within the scan, so it errs toward under-detection (lead capped at
         # max_leadtime), never toward a fabricated early warning.
         horizon_start = incident.start - max_leadtime
-        scan_mask = (
-            resource_mask & (end_times >= horizon_start) & (end_times <= incident.end)
-        )
+        scan_mask = resource_mask & (end_times >= horizon_start) & (end_times <= incident.end)
 
         result: dict[str, Any] = {
             "resource_id": incident.resource_id,
@@ -216,13 +211,9 @@ def evaluate_incidents(
             if detection_time is not None:
                 result["detected"] = True
                 result["first_detection_time"] = detection_time.isoformat()
-                result["lead_time_seconds"] = (
-                    incident.start - detection_time
-                ).total_seconds()
+                result["lead_time_seconds"] = (incident.start - detection_time).total_seconds()
 
-        in_window = (
-            resource_mask & (end_times >= incident.start) & (end_times <= incident.end)
-        )
+        in_window = resource_mask & (end_times >= incident.start) & (end_times <= incident.end)
         if in_window.any():
             result["max_error_in_window"] = float(errors[in_window].max())
 
@@ -310,6 +301,24 @@ def _windows_for_keeper(
     )
 
 
+def _warn_missing_model_features(df_long: pd.DataFrame, keeper: Keeper, source: str) -> None:
+    """Warn when a capture lacks features the checkpoint trained on.
+
+    The profile filter strips metrics the live profile no longer lists, and
+    windowing fills absent features with neutral values, so a checkpoint from
+    an older profile definition scores silently differently. A name-only
+    profile comparison cannot catch this.
+    """
+    missing = missing_features(df_long, keeper.numerical_features)
+    if missing:
+        print(
+            f"warning: {source} lacks {len(missing)} feature(s) the checkpoint was "
+            f"trained on ({', '.join(missing)}); they window as neutral values, so "
+            "scores are not comparable to the checkpoint's calibration.",
+            file=sys.stderr,
+        )
+
+
 def analyze(
     model_path: str,
     data: str,
@@ -353,6 +362,7 @@ def analyze(
     step = int(get_config().window_step)
 
     df_long = asyncio.run(fetch_full_capture(data, profile=profile, data_format=data_format))
+    _warn_missing_model_features(df_long, keeper, data)
     windows = _windows_for_keeper(df_long, keeper, seq_len, step)
     if windows.x_num.shape[0] == 0:
         raise ValueError(
@@ -363,7 +373,10 @@ def analyze(
 
     reference_errors: np.ndarray | None = None
     if reference is not None:
-        ref_long = asyncio.run(fetch_full_capture(reference, profile=profile, data_format=data_format))
+        ref_long = asyncio.run(
+            fetch_full_capture(reference, profile=profile, data_format=data_format)
+        )
+        _warn_missing_model_features(ref_long, keeper, reference)
         ref_windows = _windows_for_keeper(ref_long, keeper, seq_len, step)
         if ref_windows.x_num.shape[0] == 0:
             raise ValueError(
@@ -526,11 +539,11 @@ def main(argv: list[str] | None = None) -> int:
         set_active_profile(args.profile)
         seq_len = int(keeper.config["seq_len"])
         step = int(get_config().window_step)
-        df_long = asyncio.run(fetch_full_capture(args.data, profile=args.profile, data_format=args.format))
-        windows = _windows_for_keeper(df_long, keeper, seq_len, step)
-        errors = reconstruction_errors(
-            keeper.model, windows.x_num, windows.x_cat, keeper.device
+        df_long = asyncio.run(
+            fetch_full_capture(args.data, profile=args.profile, data_format=args.format)
         )
+        windows = _windows_for_keeper(df_long, keeper, seq_len, step)
+        errors = reconstruction_errors(keeper.model, windows.x_num, windows.x_cat, keeper.device)
         incidents = load_incidents(args.labels)
         write_plot(args.plot, errors, windows.end_times, summary["threshold"], incidents)
 

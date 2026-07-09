@@ -128,10 +128,13 @@ profiles:
   # LogicMonitor metric names.
   kubernetes:
     description: "Container orchestration workloads (K8s, ECS, Docker Swarm) (unverified: illustrative metric names, not yet reconciled to a reference capture)"
+    # Gauges and rates only: since-boot counters (cpuUsageCoreNanoSeconds,
+    # memoryPageFaults, memoryMajorPageFaults, networkRxBytes, networkTxBytes)
+    # are excluded because a monotone counter normalized on a fixed training
+    # window drifts out of distribution with wall-clock time.
     numerical_features:
       # CPU metrics (KSM_Pods)
       - cpuUsageNanoCores
-      - cpuUsageCoreNanoSeconds
       - cpuLimits
       - cpuRequests
       # Memory metrics (KSM_Pods)
@@ -141,13 +144,6 @@ profiles:
       - memoryLimits
       - memoryRequests
       - memoryAvailableBytes
-      - memoryMajorPageFaults
-      - memoryPageFaults
-      # Network metrics (KSM_Pods)
-      - networkRxBytes
-      - networkTxBytes
-      - networkRxErrors
-      - networkTxErrors
       # Storage metrics (KSM_Pods)
       - fsUsedBytes
       - fsAvailableBytes
@@ -366,24 +362,23 @@ profiles:
   # ARO Node Metrics (Azure Red Hat OpenShift, KSM node datasource)
   # Datasources: Kubernetes_KSM_Nodes, Kubernetes_KSM_NodeSummary
   # Metric names confirmed present in data/captures/aro_nodes_14d.parquet.
+  # Gauges and rates only: since-boot counters (cpuUsageCoreNanoSeconds,
+  # memoryPageFaults, memoryMajorPageFaults, networkRxBytes, networkTxBytes,
+  # nodeUptime) are excluded because a monotone counter normalized on a fixed
+  # training window drifts out of distribution with wall-clock time, inflating
+  # reconstruction error on healthy data.
   aro_node:
     description: "ARO node metrics from KSM and node summary datasources"
     numerical_features:
       - cpuUsageNanoCores
-      - cpuUsageCoreNanoSeconds
       - cpuUsagePercentage
       - memoryUsageBytes
       - memoryWorkingSetBytes
       - memoryRssBytes
       - memoryAvailableBytes
-      - memoryPageFaults
-      - memoryMajorPageFaults
       - fsUsedBytes
       - fsAvailableBytes
       - fsInodesUsed
-      - networkRxBytes
-      - networkTxBytes
-      - nodeUptime
       - kubeNodeStatusAllocatableCpu
       - kubeNodeStatusAllocatableMemory
       - kubeNodeStatusCapacityCpu

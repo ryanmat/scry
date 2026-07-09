@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,7 @@ import pandas as pd
 import torch
 
 from scry.data.fetcher import fetch_full_capture
+from scry.data.quality import missing_features
 from scry.data.windowing import build_windows
 from scry.model.checkpoint import Keeper, load_keeper
 from scry.model.reconstruction import healthy_threshold, reconstruction_errors
@@ -123,6 +125,16 @@ def bake(
     df_long = asyncio.run(
         fetch_full_capture(healthy_data, profile=profile, data_format=data_format)
     )
+    # A profile that no longer lists a trained feature strips it from the
+    # fetch; the threshold would then be calibrated on neutral-filled windows.
+    missing = missing_features(df_long, keeper.numerical_features)
+    if missing:
+        print(
+            f"warning: {healthy_data} lacks {len(missing)} feature(s) the "
+            f"checkpoint was trained on ({', '.join(missing)}); the baked "
+            "threshold will not match what the model sees on complete data.",
+            file=sys.stderr,
+        )
     serving = compute_serving_block(keeper, df_long, quantile=quantile, step=step)
 
     checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)

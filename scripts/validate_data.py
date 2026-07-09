@@ -16,6 +16,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 from scry.data.fetcher import DataFetcher
+from scry.data.quality import MIN_STEPS, format_monotone_warning, judge_metrics
 
 
 def _data_uri(cli_value: str | None) -> str | None:
@@ -147,6 +148,29 @@ async def _report(fetcher: DataFetcher, hours: int, verbose: bool, profile: str)
                 print(f"  {row['timestamp']} | {host:20} | {metric:25} | {value:.2f}")
     else:
         print(f"  [WARNING] No data in last {hours} hours for profile '{profile}'")
+
+    # Feature sanity: cumulative counters drift under a fixed normalization.
+    print()
+    print("Feature Sanity:")
+    print("-" * 40)
+    judged = judge_metrics(df) if len(df) else []
+    judged_series = sum(m["judged_series"] for m in judged)
+    flagged = [m for m in judged if m["flagged"]]
+    if len(df) == 0:
+        print("  No data to judge.")
+    elif judged_series == 0:
+        print(
+            f"  Nothing judged: no series exceeded {MIN_STEPS} samples in the "
+            f"last {hours}h window. Increase --hours for a meaningful check."
+        )
+    elif flagged:
+        for item in flagged:
+            print(f"  [!] {format_monotone_warning(item)}")
+    else:
+        print(
+            f"  {len(judged)} metrics judged ({judged_series} series); "
+            "no cumulative-counter shapes flagged."
+        )
 
 
 async def main(
