@@ -11,7 +11,10 @@ reconstruction error from the deterministic latent mean. A detection threshold i
 derived from healthy windows only -- either the windows that end strictly before
 the earliest labeled incident, or a separate reference capture -- so a large
 incident can never inflate its own threshold, and the false-positive rate is
-measured on a held-out healthy set. For each labeled incident the harness reports
+measured on a healthy set held out from the threshold fit (when the model also
+trained on that capture, the FPR remains in-sample for the model; an incident
+capture the model never saw gives a fully out-of-sample result). For each
+labeled incident the harness reports
 the sustained anomaly that leads into onset within a bounded look-back horizon and
 its lead time, where a positive value means the alarm began before onset.
 
@@ -239,7 +242,9 @@ def compute_threshold(
 
     The threshold is fit on a healthy "fit" set and the false-positive rate is
     measured on a disjoint healthy "eval" set, so the reported FPR is
-    out-of-sample. With a ``--reference`` capture the threshold is fit on the
+    out-of-sample for the threshold fit (it is out-of-sample for the model too
+    only when the model never trained on the capture supplying the eval
+    windows). With a ``--reference`` capture the threshold is fit on the
     reference and evaluated on the main capture's pre-incident windows. Otherwise
     the pre-incident windows (those ending strictly before the earliest incident)
     are time-split: the earlier half fits the threshold and the later half

@@ -108,9 +108,14 @@ Save as `data/captures/aro_incident_labels.json`.
 
 ## Validate (after the keeper model exists)
 
-`scripts/validate_incident.py` (lands with the validation phase) runs the capture
-through the keeper, computes per-window reconstruction error, overlays the labeled
-window, and reports detection lead time and threshold exceedance.
+`scripts/validate_incident.py` runs the capture through the keeper, computes
+per-window reconstruction error, overlays the labeled window, and reports
+detection lead time and threshold exceedance.
+
+`scripts/capture_incident.py` wraps this whole runbook after the induction:
+given `--onset`/`--incident-end` and a device target it exports the bracketed
+window, writes the labels sidecar, runs the validation, and prints the lead
+time in one command (`--data` re-validates an already-exported capture).
 
 This validates the anomaly / reconstruction head and detection lead time. It does
 not validate the five operational-state labels: a single incident cannot ground a

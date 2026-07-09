@@ -67,7 +67,9 @@ def time_split(
 
     A ``gap`` of windows is dropped between the halves so the eval windows share
     no raw samples with the fit windows (sliding windows overlap), keeping the
-    false-positive rate genuinely out-of-sample.
+    false-positive rate out-of-sample for the threshold fit. The split says
+    nothing about the model: if the model trained on this same capture, the FPR
+    measured on the eval half is still in-sample for the model.
 
     Args:
         errors: Per-window errors.
@@ -97,9 +99,11 @@ def healthy_threshold(
 
     The threshold is fit on the earlier half of the healthy windows and the later
     half (with a ``gap`` of windows dropped between them so the two share no raw
-    samples) is left as an out-of-sample healthy set for measuring the
-    false-positive rate. When there are too few windows to leave a held-out half,
-    the threshold is fit on the whole set and the eval set is empty.
+    samples) is left as a healthy set for measuring the false-positive rate,
+    out-of-sample for the threshold fit but not necessarily for the model: a
+    capture the model trained on yields a model-in-sample FPR. When there are too
+    few windows to leave a held-out half, the threshold is fit on the whole set
+    and the eval set is empty.
 
     Args:
         errors: Per-window errors for an all-healthy capture.

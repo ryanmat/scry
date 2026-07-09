@@ -10,7 +10,7 @@
 
 </div>
 
-Scry predicts infrastructure failure states from a stream of metrics. It sorts each resource into one of five operational states, recommends an action for each, and forecasts where the metrics are headed. It is data-source agnostic and runs offline. No trained weights ship.
+Scry predicts infrastructure failure states from a stream of metrics. It learns what healthy looks like, scores each resource's reconstruction error against a threshold calibrated on healthy data, and alarms before degradation; an incident-validation harness measures how early (the detection lead time). It also forecasts where the metrics are headed and discovers operational states by unsupervised clustering. It is data-source agnostic and runs offline. No trained weights ship.
 
 Currently being used for LogicMonitor metric predictions.
 The default path reads Parquet or CSV from local files or object storage. Everything normalizes to one canonical long-format table, so any metric source works once it is in that shape.
@@ -19,12 +19,13 @@ Shout out to my MTG heads.
 
 <table>
 <tr><td><b>The X-DEC model</b></td><td>A dual-encoder temporal VAE plus deep embedded clustering, pure PyTorch, no cloud dependencies. Trains on your own windowed metrics from scratch.</td></tr>
-<tr><td><b>Five operational states</b></td><td>Every resource is sorted into NORMAL, PRE_SCALE, PRE_FAILURE, ACTIVE_DEGRADATION, or ANOMALY, each mapped to a recommended action and priority.</td></tr>
+<tr><td><b>Reconstruction anomaly signal</b></td><td>The validated serving signal: per-window reconstruction error as a ratio of a threshold baked from healthy windows (<code>scripts/bake_serving_threshold.py</code>), served at <code>/anomaly/reconstruction</code>. Windows too short or without numerical coverage are reported not-scored, never padded into a false alarm.</td></tr>
+<tr><td><b>Operational-state discovery</b></td><td>Deep embedded clustering discovers five nominal states: NORMAL, PRE_SCALE, PRE_FAILURE, ACTIVE_DEGRADATION, ANOMALY. The labels are unsupervised and not yet grounded on labeled incidents, so on healthy-trained models cluster-derived alerting stays disabled and the reconstruction signal is authoritative.</td></tr>
 <tr><td><b>Forecasting</b></td><td>An optional Chronos layer (<code>scryml[forecast]</code>) projects where each metric is headed across multiple horizons, kept behind an extra so the core stays offline-capable.</td></tr>
 <tr><td><b>Data-source agnostic</b></td><td>Read Parquet or CSV from local disk or object storage (S3, GCS, ADLS, MinIO) through DuckDB. A LogicMonitor REST exporter lives behind <code>scryml[logicmonitor]</code>.</td></tr>
 <tr><td><b>Coverage and quality checks</b></td><td>Before training or serving, report which profile features are present or missing and whether the data is fresh and gap-free, computed directly over the object store with <code>scripts/validate_data.py</code>.</td></tr>
 <tr><td><b>Incident-validation harness</b></td><td>Score a trained model against a labeled incident capture: per-window reconstruction error thresholded on healthy data only, reporting detection lead time (how early the alarm fires before onset) with <code>scripts/validate_incident.py</code>.</td></tr>
-<tr><td><b>A small HTTP service</b></td><td>FastAPI endpoints for prediction, forecasting, drift, anomaly, and accuracy: <code>/predict</code>, <code>/predict/lookup</code>, <code>/forecast</code>, <code>/drift</code>, <code>/anomaly</code>, <code>/accuracy</code>.</td></tr>
+<tr><td><b>A small HTTP service</b></td><td>FastAPI endpoints for anomaly scoring, prediction, and forecasting: <code>/anomaly/reconstruction</code>, <code>/anomaly/reconstruction/lookup</code>, <code>/predict</code>, <code>/predict/lookup</code>, <code>/forecast</code>. <code>/drift</code>, <code>/anomaly</code>, and <code>/accuracy</code> need operator-wired detectors and serve 503 until configured.</td></tr>
 <tr><td><b>Schema-checked serving</b></td><td>Each trained model carries its feature schema (names, order, profile, normalization). The API aligns incoming metrics by name, so a coverage gap between sources is a checked contract, not a silent misalignment.</td></tr>
 <tr><td><b>Bring your own data</b></td><td>One canonical schema: resource, metric, timestamp, value, plus optional host and datasource fields. Drop your metrics into that table and train. Profiles may be purely numerical or mix numerical and categorical features. No real telemetry or weights are included.</td></tr>
 </table>
@@ -66,7 +67,7 @@ curl localhost:8000/health
 curl localhost:8000/clusters
 ```
 
-Full walkthrough, including a `/predict` call: [examples/quickstart.md](examples/quickstart.md).
+Full walkthrough: [examples/quickstart.md](examples/quickstart.md).
 
 ## Documentation
 

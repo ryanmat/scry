@@ -6,11 +6,16 @@
 
 Loads a keeper, scores an all-healthy capture with the same reconstruction math
 the incident-validation harness uses, derives a quantile threshold from the
-healthy windows (with a held-out half for the false-positive rate), and writes a
-``serving`` block into the checkpoint:
+healthy windows (with a half held out from threshold fitting for the
+false-positive rate), and writes a ``serving`` block into the checkpoint:
 ``{threshold, quantile, healthy_fpr, n_calibration_windows, recon_metric}``. The
 serving API reads this block to turn a per-window reconstruction error into an
 alertable ratio.
+
+The holdout is from THRESHOLD FITTING only. When the healthy capture is also the
+data the model trained on, ``healthy_fpr`` is in-sample for the model and will
+understate the live rate; bake against a fresh healthy capture disjoint from the
+training range for an operational number.
 
 Example:
     python scripts/bake_serving_threshold.py \\
