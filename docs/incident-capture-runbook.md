@@ -31,13 +31,25 @@ uncordon). Record the UTC start before you induce and the UTC end after recovery
 Two sizing rules before you induce:
 
 - **Duration**: the validation's detection rule requires a *sustained* run --
-  `sustain` consecutive windows over threshold. At the defaults (sustain 3, the
-  configured window step and length) the incident must stay elevated for roughly
-  60-90 minutes; a 30-minute burst can spike individual windows over threshold
-  without ever forming a sustained run.
+  `sustain` consecutive windows over threshold, and only windows that *end* by the
+  labeled incident end count toward it. Windows are `seq_len` samples long and
+  slide by `window_step` samples, so the reconstruction error must stay over
+  threshold for `sustain x window_step` samples of stride, after up to a full
+  window of fill before the first window clears. At the defaults (seq_len 30,
+  step 10, sustain 3, 2-minute samples) that is ~60 minutes of sustained
+  elevation after up to 60 minutes of fill: plan the over-threshold portion at
+  60 minutes or more and the whole induction at 120 or more, back-loaded. A
+  30-minute burst can spike individual windows over threshold without ever
+  forming a sustained run.
 - **Placement**: never stress the node hosting the monitoring collector (for LM
   Container: the argus/collector, collectorset-controller, and kube-state-metrics
   pods). Starving the collector distorts every node's metrics in the capture.
+  Pods reschedule, so verify placement the same day you induce:
+
+  ```bash
+  kubectl get pods -A -o wide | grep -iE 'argus|collectorset|kube-state-metrics'
+  kubectl get pods -A --field-selector spec.nodeName=<target-node>
+  ```
 
 ### Tier 1 (safe): CPU + memory stress
 
@@ -69,6 +81,58 @@ ceiling. Keep the total `--vm` bytes under the memory limit or the stressor
 OOM-kills itself.
 
 Rollback: `kubectl delete pod scry-stress`.
+
+#### Gradual-ramp variant (preferred for lead-time measurement)
+
+A step change gives near-zero lead time by construction; real failures creep.
+Run the whole ramp as one self-contained pod so a dropped operator session,
+expired login, or network blip cannot stall it mid-ramp; the step timestamps
+come from the pod log afterwards.
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: scry-ramp
+spec:
+  nodeName: <target-node>
+  restartPolicy: Never
+  activeDeadlineSeconds: 10800
+  containers:
+    - name: ramp
+      image: ghcr.io/colinianking/stress-ng
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          echo "RAMP_START $(date -u +%FT%TZ)"
+          echo "STEP25 $(date -u +%FT%TZ)";  stress-ng --cpu 0 --cpu-load 25  --vm 1 --vm-bytes 1G --timeout 1200s
+          echo "STEP50 $(date -u +%FT%TZ)";  stress-ng --cpu 0 --cpu-load 50  --vm 1 --vm-bytes 1G --timeout 1200s
+          echo "STEP80 $(date -u +%FT%TZ)";  stress-ng --cpu 0 --cpu-load 80  --vm 1 --vm-bytes 1G --timeout 2400s
+          echo "STEP100 $(date -u +%FT%TZ)"; stress-ng --cpu 0 --cpu-load 100 --vm 1 --vm-bytes 1G --timeout 3600s
+          echo "RAMP_END $(date -u +%FT%TZ)"
+      resources:
+        requests: { cpu: "500m", memory: "512Mi" }
+        limits:   { cpu: "4",    memory: "2Gi" }
+```
+
+- `--cpu 0` runs one worker per online CPU; the CPU *limit*, not the worker
+  count, caps the delivered load. Limits are not admission-checked, so a limit
+  equal to the node's CPU count lets the top step saturate the node; a lower
+  limit tops out below it (a 3-of-4-CPU limit peaks near 88% node CPU and never
+  crosses a 90% alert tier). Size the top step against the node's measured
+  baseline and the alert thresholds you want crossed.
+- The pod ends itself (`--timeout` per step plus `activeDeadlineSeconds` as the
+  dead-man switch). Take the incident end from the final log line, then delete
+  the pod and confirm the node returns to baseline before exporting.
+- If the target node cannot pull from the public registry (node-local DNS
+  failures surface as `ImagePullBackOff` / "server misbehaving"), import the
+  image into the cluster's internal registry off-node and reference it there:
+
+  ```bash
+  oc import-image stress-ng --from=ghcr.io/colinianking/stress-ng --confirm \
+      --reference-policy=local -n <namespace>
+  # then set: image: image-registry.openshift-image-registry.svc:5000/<namespace>/stress-ng:latest
+  ```
 
 ### Tier 2 (moderate): filesystem fill
 
@@ -124,6 +188,13 @@ ISO 8601; `resource_id` matches the capture's `resource_id` (the device displayN
 ```
 
 Save as `data/captures/aro_incident_labels.json`.
+
+Record more than one onset candidate while the incident runs: the stressor start
+(pod log), the first sample at or over the monitoring system's alert threshold
+(read from the capture afterwards), and the monitoring system's alert timestamp
+(which lags the actual crossing by its poll interval times its trigger count).
+Re-running the validation per onset via `--data` is free, and the spread between
+those lead times is part of the result, not noise to hide.
 
 ## Validate (after the keeper model exists)
 

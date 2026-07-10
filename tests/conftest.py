@@ -32,6 +32,21 @@ import bake_serving_threshold as _bake  # noqa: E402
 from synth import CAT, PROFILE, SEQ_LEN, SERIES, gen_capture, write_csv  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _restore_active_profile():
+    """Snapshot and restore the global active feature profile around every test.
+
+    ``analyze()`` in the harness scripts (and any test calling
+    ``set_active_profile`` directly) mutates module-global state in
+    ``scry.data.feature_engineering``; without a per-test restore, a test that
+    runs earlier in the collection order silently changes which features later
+    tests classify as numerical/categorical.
+    """
+    prev = _fe._active_config
+    yield
+    _fe._active_config = prev
+
+
 @pytest.fixture(scope="session")
 def keeper_path(tmp_path_factory: pytest.TempPathFactory) -> str:
     """Train a tiny keeper on synthetic normal data and save its checkpoint.

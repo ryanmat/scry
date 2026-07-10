@@ -237,13 +237,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                             help="consecutive anomalous windows required (default 3)")
     validation.add_argument("--max-leadtime", type=float, default=7200.0,
                             help="look-back horizon before onset, seconds (default 7200)")
-    validation.add_argument("--reference", help="healthy reference capture for the threshold")
+    threshold_group = validation.add_mutually_exclusive_group()
+    threshold_group.add_argument("--reference", help="healthy reference capture for the threshold")
+    threshold_group.add_argument("--threshold", type=float,
+                                 help="explicit anomaly threshold; skips the fit and any reference")
     validation.add_argument("--format", choices=["parquet", "csv"], dest="data_format",
                             help="explicit capture file format override")
 
     ap.add_argument("--out-dir", required=True,
                     help="directory for the capture, labels, and summary artifacts")
-    return ap.parse_args(argv)
+    args = ap.parse_args(argv)
+    if args.threshold is not None and args.threshold <= 0:
+        ap.error("--threshold must be a positive reconstruction-error value")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -332,6 +338,7 @@ def main(argv: list[str] | None = None) -> int:
             sustain=args.sustain,
             max_leadtime_seconds=args.max_leadtime,
             reference=args.reference,
+            threshold=args.threshold,
             data_format=args.data_format,
         )
     except ValueError as exc:  # no windows / no healthy windows / bad labels
