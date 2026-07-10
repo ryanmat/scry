@@ -13,7 +13,9 @@ the earliest labeled incident, or a separate reference capture -- so a large
 incident can never inflate its own threshold, and the false-positive rate is
 measured on a healthy set held out from the threshold fit (when the model also
 trained on that capture, the FPR remains in-sample for the model; an incident
-capture the model never saw gives a fully out-of-sample result). For each
+capture the model never saw gives a fully out-of-sample result). An explicit
+threshold override skips this derivation entirely and measures the false-positive
+rate directly on the pre-onset windows. For each
 labeled incident the harness reports
 the sustained anomaly that leads into onset within a bounded look-back horizon and
 its lead time, where a positive value means the alarm began before onset.
@@ -329,6 +331,7 @@ def analyze(
     sustain: int = 3,
     max_leadtime_seconds: float = 7200.0,
     reference: str | None = None,
+    threshold: float | None = None,
     data_format: str | None = None,
 ) -> dict[str, Any]:
     """Run the full incident-validation analysis and return the summary.
@@ -342,6 +345,9 @@ def analyze(
         sustain: Consecutive anomalous windows required for a detection.
         max_leadtime_seconds: Look-back horizon before onset for detection.
         reference: Optional healthy reference capture URI/path.
+        threshold: Explicit anomaly threshold; when given, the healthy-window fit
+            and any reference are skipped and the FPR is measured on the pre-onset
+            windows. Takes precedence over ``reference``.
         data_format: Optional explicit file format override.
 
     Returns:
@@ -371,43 +377,59 @@ def analyze(
         )
     errors = reconstruction_errors(keeper.model, windows.x_num, windows.x_cat, keeper.device)
 
-    reference_errors: np.ndarray | None = None
-    if reference is not None:
-        ref_long = asyncio.run(
-            fetch_full_capture(reference, profile=profile, data_format=data_format)
-        )
-        _warn_missing_model_features(ref_long, keeper, reference)
-        ref_windows = _windows_for_keeper(ref_long, keeper, seq_len, step)
-        if ref_windows.x_num.shape[0] == 0:
-            raise ValueError(
-                f"Reference capture {reference} produced no windows for profile '{profile}'."
+    resolved_threshold: float
+    summary_quantile: float | None
+    if threshold is not None:
+        # An explicit override skips the fit entirely: no reference is fetched and
+        # no quantile is taken. The FPR is still measured, on the capture's
+        # pre-onset windows (those ending strictly before the earliest incident) --
+        # the same eval set the reference path scores.
+        resolved_threshold = threshold
+        source = "override"
+        summary_quantile = None
+        earliest = min(incident.start for incident in incidents)
+        eval_errors = errors[windows.end_times < earliest]
+        fit_errors = np.empty(0, dtype=errors.dtype)
+    else:
+        summary_quantile = threshold_quantile
+        reference_errors: np.ndarray | None = None
+        if reference is not None:
+            ref_long = asyncio.run(
+                fetch_full_capture(reference, profile=profile, data_format=data_format)
             )
-        reference_errors = reconstruction_errors(
-            keeper.model, ref_windows.x_num, ref_windows.x_cat, keeper.device
+            _warn_missing_model_features(ref_long, keeper, reference)
+            ref_windows = _windows_for_keeper(ref_long, keeper, seq_len, step)
+            if ref_windows.x_num.shape[0] == 0:
+                raise ValueError(
+                    f"Reference capture {reference} produced no windows for profile '{profile}'."
+                )
+            reference_errors = reconstruction_errors(
+                keeper.model, ref_windows.x_num, ref_windows.x_cat, keeper.device
+            )
+
+        # Drop a gap spanning the window overlap (ceil(seq_len / step) windows) between
+        # the fit and eval halves so the held-out FPR shares no raw samples with the fit.
+        overlap_gap = -(-seq_len // step)
+        resolved_threshold, source, fit_errors, eval_errors = compute_threshold(
+            errors, windows.end_times, incidents, reference_errors, threshold_quantile, overlap_gap
         )
 
-    # Drop a gap spanning the window overlap (ceil(seq_len / step) windows) between
-    # the fit and eval halves so the held-out FPR shares no raw samples with the fit.
-    overlap_gap = -(-seq_len // step)
-    threshold, source, fit_errors, eval_errors = compute_threshold(
-        errors, windows.end_times, incidents, reference_errors, threshold_quantile, overlap_gap
-    )
-    healthy_fpr = float(np.mean(eval_errors > threshold)) if eval_errors.size else None
+    healthy_fpr = float(np.mean(eval_errors > resolved_threshold)) if eval_errors.size else None
 
     incident_results = evaluate_incidents(
         errors,
         windows.resource_ids,
         windows.end_times,
         incidents,
-        threshold,
+        resolved_threshold,
         sustain,
         pd.Timedelta(seconds=max_leadtime_seconds),
     )
 
     return {
-        "threshold": threshold,
+        "threshold": resolved_threshold,
         "threshold_source": source,
-        "threshold_quantile": threshold_quantile,
+        "threshold_quantile": summary_quantile,
         "sustain": sustain,
         "max_leadtime_seconds": max_leadtime_seconds,
         "n_windows": int(errors.size),
@@ -499,17 +521,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=7200.0,
         help="Look-back horizon in seconds before onset to credit a detection (default: 7200).",
     )
-    parser.add_argument(
+    threshold_group = parser.add_mutually_exclusive_group()
+    threshold_group.add_argument(
         "--reference",
         default=None,
         help="Optional healthy reference capture for the threshold instead of a temporal split.",
+    )
+    threshold_group.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="Explicit anomaly threshold; skips the healthy-window fit and any reference.",
     )
     parser.add_argument(
         "--format", choices=["parquet", "csv"], default=None, help="Override the file format."
     )
     parser.add_argument("--plot", default=None, help="Optional path to write a timeline figure.")
     parser.add_argument("--output", default=None, help="Optional path to write the JSON summary.")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.threshold is not None and args.threshold <= 0:
+        parser.error("--threshold must be a positive reconstruction-error value.")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -525,6 +557,7 @@ def main(argv: list[str] | None = None) -> int:
         sustain=args.sustain,
         max_leadtime_seconds=args.max_leadtime,
         reference=args.reference,
+        threshold=args.threshold,
         data_format=args.format,
     )
 

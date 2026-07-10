@@ -14,6 +14,7 @@ fixture are shared through ``conftest.py``.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import numpy as np
@@ -245,3 +246,104 @@ def test_zero_healthy_windows_errors_clearly(keeper_path: str, tmp_path: Path) -
 
     with pytest.raises(ValueError, match="No healthy windows"):
         vi.analyze(keeper_path, capture_csv, labels, _PROFILE)
+
+
+def _pre_onset_errors(keeper_path: str, data_csv: str, onset: pd.Timestamp) -> np.ndarray:
+    """Recompute the capture's pre-onset reconstruction errors independently.
+
+    Mirrors the harness's own windowing and scoring so a test can pin the
+    override false-positive rate against the exact pre-onset error fractions.
+    """
+    keeper = vi.load_keeper(keeper_path)
+    vi.set_active_profile(_PROFILE)
+    seq_len = int(keeper.config["seq_len"])
+    step = int(vi.get_config().window_step)
+    df_long = asyncio.run(vi.fetch_full_capture(data_csv, profile=_PROFILE))
+    windows = vi._windows_for_keeper(df_long, keeper, seq_len, step)
+    errors = vi.reconstruction_errors(keeper.model, windows.x_num, windows.x_cat, keeper.device)
+    return errors[windows.end_times < onset]
+
+
+def test_threshold_override_reports_source_and_value(keeper_path: str, tmp_path: Path) -> None:
+    """An explicit override is echoed verbatim, tags its source, and skips the fit."""
+    capture_df, ts = _gen_capture("node-a", 700, seed=2, spike=(600, 700, 40.0))
+    capture_csv = _write_csv(capture_df, tmp_path / "spike.csv")
+    labels = _write_labels(
+        tmp_path / "labels.json", [_incident("node-a", "cpu_spike", ts[600], ts[699])]
+    )
+
+    override = 0.5
+    summary = vi.analyze(keeper_path, capture_csv, labels, _PROFILE, threshold=override)
+
+    assert summary["threshold_source"] == "override"
+    assert summary["threshold"] == override
+    # A quantile is meaningless for an override, so it is reported as null.
+    assert summary["threshold_quantile"] is None
+    # No fit set exists under an override; the FPR is measured, not fit.
+    assert summary["n_threshold_windows"] == 0
+
+
+def test_threshold_override_measures_pre_onset_fpr(keeper_path: str, tmp_path: Path) -> None:
+    """The override FPR is exactly the pre-onset fraction whose error exceeds it."""
+    capture_df, ts = _gen_capture("node-a", 560, seed=3)  # all healthy
+    capture_csv = _write_csv(capture_df, tmp_path / "healthy.csv")
+    onset = ts[500]
+    labels = _write_labels(tmp_path / "labels.json", [_incident("node-a", "none", onset, ts[559])])
+
+    pre_errors = _pre_onset_errors(keeper_path, capture_csv, onset)
+    override = float(np.median(pre_errors))  # a non-trivial fraction lies above it
+    expected_fpr = float(np.mean(pre_errors > override))
+
+    summary = vi.analyze(keeper_path, capture_csv, labels, _PROFILE, threshold=override)
+
+    # The eval set is every pre-onset window, and the FPR is their exceedance fraction.
+    assert summary["n_eval_windows"] == pre_errors.size
+    assert summary["healthy_fpr"] == pytest.approx(expected_fpr)
+
+
+def test_threshold_override_reproduces_computed_detection(
+    keeper_path: str, tmp_path: Path
+) -> None:
+    """Handing a computed threshold back as an override reproduces the same detection."""
+    capture_df, ts = _gen_capture("node-a", 700, seed=2, spike=(600, 700, 40.0))
+    capture_csv = _write_csv(capture_df, tmp_path / "spike.csv")
+    labels = _write_labels(
+        tmp_path / "labels.json", [_incident("node-a", "cpu_spike", ts[600], ts[699])]
+    )
+
+    baseline = vi.analyze(keeper_path, capture_csv, labels, _PROFILE)
+    override = vi.analyze(
+        keeper_path, capture_csv, labels, _PROFILE, threshold=baseline["threshold"]
+    )
+
+    assert baseline["incidents"][0]["detected"] is True
+    assert override["threshold"] == baseline["threshold"]
+    assert override["incidents"][0]["detected"] == baseline["incidents"][0]["detected"]
+    assert (
+        override["incidents"][0]["lead_time_seconds"]
+        == baseline["incidents"][0]["lead_time_seconds"]
+    )
+
+
+def _validate_argv(tmp_path: Path, *extra: str) -> list[str]:
+    """The required CLI args for validate_incident, plus any extra flags."""
+    return [
+        "--model", "m.pt",
+        "--data", str(tmp_path / "d.csv"),
+        "--labels", str(tmp_path / "l.json"),
+        "--profile", _PROFILE,
+        *extra,
+    ]
+
+
+def test_threshold_and_reference_are_mutually_exclusive(tmp_path: Path) -> None:
+    """The CLI rejects --threshold together with --reference."""
+    with pytest.raises(SystemExit):
+        vi.parse_args(_validate_argv(tmp_path, "--threshold", "0.5", "--reference", "r.csv"))
+
+
+def test_nonpositive_threshold_is_rejected(tmp_path: Path) -> None:
+    """The CLI rejects a zero or negative --threshold."""
+    for bad in ("0", "-1.5"):
+        with pytest.raises(SystemExit):
+            vi.parse_args(_validate_argv(tmp_path, "--threshold", bad))

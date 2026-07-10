@@ -22,7 +22,8 @@ import numpy as np
 import pandas as pd
 import pytest
 import respx
-from synth import CAT, SERIES, gen_capture, write_csv
+import validate_incident as vi
+from synth import CAT, PROFILE, SERIES, gen_capture, make_incident, write_csv, write_labels
 
 import scry.data.feature_engineering as _fe
 
@@ -97,6 +98,24 @@ def test_unparseable_onset_exits_via_argparse(tmp_path: Path) -> None:
     assert exc_info.value.code == 2
 
 
+def test_threshold_and_reference_are_mutually_exclusive(tmp_path: Path) -> None:
+    """The wrapper rejects --threshold together with --reference."""
+    argv = _base_args(tmp_path) + [
+        "--data", "whatever.csv", "--threshold", "0.5", "--reference", "ref.csv",
+    ]
+    with pytest.raises(SystemExit) as exc_info:
+        ci.main(argv)
+    assert exc_info.value.code == 2
+
+
+def test_nonpositive_threshold_is_rejected(tmp_path: Path) -> None:
+    """The wrapper rejects a zero or negative --threshold."""
+    argv = _base_args(tmp_path) + ["--data", "whatever.csv", "--threshold", "0"]
+    with pytest.raises(SystemExit) as exc_info:
+        ci.main(argv)
+    assert exc_info.value.code == 2
+
+
 # -- the --data path: real analyze on synthetic captures ---------------------------
 
 
@@ -144,6 +163,37 @@ def test_healthy_capture_reports_not_detected_with_exit_zero(
     (incident,) = summary["incidents"]
     assert incident["detected"] is False
     assert "NOT DETECTED cpu_ramp on node-a" in capsys.readouterr().out
+
+
+def test_data_path_threshold_override_detects_end_to_end(
+    keeper_path: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--threshold flows through the wrapper and reproduces the computed detection."""
+    capture_df, ts = gen_capture("node-a", 700, seed=2, spike=(600, 700, 40.0))
+    data = write_csv(capture_df, tmp_path / "capture.csv")
+
+    # A healthy-split threshold on the same capture, reused as the override; the
+    # wrapper writes the identical labels, so the value it would fit is the same.
+    labels = write_labels(
+        tmp_path / "labels.json", [make_incident("node-a", "cpu_ramp", ts[600], ts[699])]
+    )
+    baseline = vi.analyze(keeper_path, data, labels, PROFILE)
+    override = baseline["threshold"]
+    assert baseline["incidents"][0]["detected"] is True
+
+    out_dir = tmp_path / "out"
+    argv = _base_args(
+        tmp_path,
+        **{"--onset": ts[600].isoformat(), "--incident-end": ts[699].isoformat()},
+    ) + ["--data", data, "--model", keeper_path, "--threshold", repr(override)]
+    assert ci.main(argv) == 0
+
+    summary = json.loads((out_dir / "summary.json").read_text())
+    assert summary["threshold_source"] == "override"
+    assert summary["threshold"] == pytest.approx(override)
+    (incident,) = summary["incidents"]
+    assert incident["detected"] is True
+    assert "source=override" in capsys.readouterr().out
 
 
 def test_labels_sidecar_has_exactly_the_harness_schema(keeper_path: str, tmp_path: Path) -> None:
