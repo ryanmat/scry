@@ -4,6 +4,7 @@
 """Prediction service for the API."""
 
 import logging
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -193,7 +194,19 @@ class Predictor:
         # it without re-baking. Absent both, the reconstruction endpoint still runs
         # and returns the raw error with a null ratio.
         self.serving = checkpoint.get("serving")
-        self.recon_threshold = self._resolve_recon_threshold(self.serving)
+        # The env override is parsed exactly once here: it is an operator retune fixed
+        # for the process lifetime, and re-parsing per request would log a warning on
+        # every scored request when the value is invalid.
+        self._recon_env_threshold = self._env_recon_threshold()
+        self.recon_threshold = (
+            self._recon_env_threshold
+            if self._recon_env_threshold is not None
+            else self._serving_recon_threshold(self.serving)
+        )
+        # Per-resource thresholds (baked via --per-resource-margin) refine the global
+        # for resources whose identity the caller resolved; the env override, being an
+        # explicit operator retune, beats both.
+        self.recon_thresholds_per_resource = self._resolve_per_resource_thresholds(self.serving)
         if self.recon_threshold is None:
             logger.warning(
                 "no reconstruction threshold configured (no serving block and no "
@@ -203,30 +216,64 @@ class Predictor:
             )
 
     @staticmethod
-    def _resolve_recon_threshold(serving: dict[str, Any] | None) -> float | None:
-        """Resolve the reconstruction threshold: env override, else serving block, else None.
-
-        A non-positive value (from either source) is rejected with a warning, since
-        the reconstruction error is a non-negative MSE and a threshold <= 0 cannot
-        discriminate. This keeps ``/health/detailed`` and the scoring path in
-        agreement rather than advertising a threshold the scorer would ignore.
-        """
+    def _env_recon_threshold() -> float | None:
+        """The validated SCRY_RECON_THRESHOLD env override, or None when unset/invalid."""
         env_value = os.environ.get("SCRY_RECON_THRESHOLD")
-        if env_value is not None:
-            try:
-                parsed = float(env_value)
-            except ValueError:
-                logger.warning("ignoring invalid SCRY_RECON_THRESHOLD=%r (not a float)", env_value)
-            else:
-                if parsed > 0:
-                    return parsed
-                logger.warning("ignoring non-positive SCRY_RECON_THRESHOLD=%r", env_value)
+        if env_value is None:
+            return None
+        try:
+            parsed = float(env_value)
+        except ValueError:
+            logger.warning("ignoring invalid SCRY_RECON_THRESHOLD=%r (not a float)", env_value)
+            return None
+        if parsed > 0:
+            return parsed
+        logger.warning("ignoring non-positive SCRY_RECON_THRESHOLD=%r", env_value)
+        return None
+
+    @staticmethod
+    def _serving_recon_threshold(serving: dict[str, Any] | None) -> float | None:
+        """The serving block's global threshold, or None when absent or unusable.
+
+        A non-positive value is rejected with a warning, since the reconstruction
+        error is a non-negative MSE and a threshold <= 0 cannot discriminate. This
+        keeps ``/health/detailed`` and the scoring path in agreement rather than
+        advertising a threshold the scorer would ignore.
+        """
         if serving and serving.get("threshold") is not None:
             threshold = float(serving["threshold"])
             if threshold > 0:
                 return threshold
             logger.warning("ignoring non-positive serving threshold %r in checkpoint", threshold)
         return None
+
+    @staticmethod
+    def _resolve_per_resource_thresholds(serving: dict[str, Any] | None) -> dict[str, float]:
+        """The serving block's per-resource threshold map, validated entry by entry.
+
+        Non-numeric and non-positive entries are dropped with a warning; the
+        affected resource then serves the global threshold like any unknown one.
+        """
+        if not serving:
+            return {}
+        thresholds: dict[str, float] = {}
+        for rid, value in (serving.get("per_resource") or {}).items():
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "ignoring non-numeric per-resource threshold for %r: %r", rid, value
+                )
+                continue
+            if math.isfinite(parsed) and parsed > 0:
+                thresholds[str(rid)] = parsed
+            else:
+                logger.warning(
+                    "ignoring non-finite or non-positive per-resource threshold for %r: %r",
+                    rid,
+                    value,
+                )
+        return thresholds
 
     @staticmethod
     def _fit_length(values: np.ndarray, seq_len: int) -> np.ndarray:
@@ -460,7 +507,9 @@ class Predictor:
         """
         return self.score_reconstruction(_frame_from_series(numerical_metrics, categorical_metrics))
 
-    def score_reconstruction(self, df_long: pd.DataFrame) -> dict[str, Any]:
+    def score_reconstruction(
+        self, df_long: pd.DataFrame, *, resource_id: str | None = None
+    ) -> dict[str, Any]:
         """Score the most recent reconstruction window of a long-format frame.
 
         Windows the frame in the model's feature order with its stored
@@ -478,6 +527,11 @@ class Predictor:
 
         Args:
             df_long: Canonical long-format metrics for a single resource.
+            resource_id: The resource's canonical identity, when the caller has
+                resolved it (the lookup path passes the id matched in the data
+                source). Selects that resource's baked per-resource threshold if
+                one exists; unknown or absent ids serve the global threshold, and
+                the ``SCRY_RECON_THRESHOLD`` env override beats both.
 
         Returns:
             Dict with reconstruction_error, threshold, ratio, is_anomaly, severity,
@@ -487,6 +541,8 @@ class Predictor:
         with tracer.start_as_current_span("score_reconstruction") as span:
             seq_len = int(self.config["seq_len"])
             threshold = self.recon_threshold
+            if resource_id is not None and self._recon_env_threshold is None:
+                threshold = self.recon_thresholds_per_resource.get(str(resource_id), threshold)
 
             error, coverage = self._latest_window(df_long, seq_len)
             span.set_attribute("reconstruction.coverage", coverage)

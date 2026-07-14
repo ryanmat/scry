@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -47,9 +48,20 @@ from scry.utils.config import get_config
 # different metric (e.g. numerical+categorical error) at a different scale.
 RECON_METRIC = "numerical_mse_from_mu"
 
+# Floor on per-resource calibration size: a resource with fewer windows is omitted
+# from the per-resource map. This screens near-empty resources only; a small-sample
+# q99 still sits at or near the sample maximum and leans tight relative to the true
+# quantile, and the margin multiplier is what carries that headroom.
+MIN_PER_RESOURCE_WINDOWS = 50
+
 
 def compute_serving_block(
-    keeper: Keeper, df_long: pd.DataFrame, *, quantile: float, step: int
+    keeper: Keeper,
+    df_long: pd.DataFrame,
+    *,
+    quantile: float,
+    step: int,
+    per_resource_margin: float | None = None,
 ) -> dict[str, Any]:
     """Derive the serving block from a keeper and an all-healthy capture.
 
@@ -58,6 +70,12 @@ def compute_serving_block(
         df_long: Canonical long-format healthy metrics.
         quantile: Healthy-window quantile for the threshold.
         step: Sliding-window step (from the config).
+        per_resource_margin: When set, additionally write a ``per_resource`` map of
+            ``margin x own_quantile`` thresholds, one per resource in the capture.
+            The per-resource quantile is taken over all of that resource's windows
+            (no holdout split); the margin carries the cross-day drift headroom.
+            A resource whose windows are too few for a meaningful quantile is
+            omitted (it serves the global threshold as fallback).
 
     Returns:
         The serving block dict.
@@ -88,13 +106,62 @@ def compute_serving_block(
         errors, windows.end_times, quantile=quantile, gap=overlap_gap
     )
     healthy_fpr = float(np.mean(eval_ > threshold)) if eval_.size else None
-    return {
+    block: dict[str, Any] = {
         "threshold": threshold,
         "quantile": quantile,
         "healthy_fpr": healthy_fpr,
         "n_calibration_windows": int(fit.size),
         "recon_metric": RECON_METRIC,
     }
+    if per_resource_margin is not None:
+        if not math.isfinite(per_resource_margin) or per_resource_margin <= 0:
+            raise ValueError("per_resource_margin must be a positive finite number")
+        # A feature absent for one resource but supplied elsewhere in the capture is
+        # filled at -mean/std by the capture-wide windowing here, while the serving
+        # path (which windows the resource alone) fills it neutral. A per-resource
+        # quantile from such windows sits on a scale serving never produces, so the
+        # affected resource is omitted and falls back to the global threshold.
+        trained = set(keeper.numerical_features)
+        capture_features = set(df_long["metric_name"].unique()) & trained
+        features_by_resource = {
+            str(rid): set(group["metric_name"].unique())
+            for rid, group in df_long.groupby("resource_id")
+        }
+        per_resource: dict[str, float] = {}
+        for rid in sorted(set(windows.resource_ids)):
+            divergent = capture_features - features_by_resource.get(str(rid), set())
+            if divergent:
+                print(
+                    f"warning: resource {rid!r} lacks {len(divergent)} trained "
+                    f"feature(s) the capture supplies elsewhere "
+                    f"({', '.join(sorted(divergent))}); its bake-time windows are "
+                    "filled at -mean/std where serving fills neutral, so it is "
+                    "omitted from the per-resource map and serves the global "
+                    "threshold.",
+                    file=sys.stderr,
+                )
+                continue
+            rerr = errors[windows.resource_ids == rid]
+            if rerr.size < MIN_PER_RESOURCE_WINDOWS:
+                print(
+                    f"warning: resource {rid!r} has only {rerr.size} window(s) "
+                    f"(< {MIN_PER_RESOURCE_WINDOWS}); omitting it from the "
+                    "per-resource map, it will serve the global threshold.",
+                    file=sys.stderr,
+                )
+                continue
+            own_quantile = float(np.quantile(rerr, quantile))
+            if own_quantile <= 0:
+                print(
+                    f"warning: resource {rid!r} has a non-positive healthy quantile; "
+                    "omitting it from the per-resource map.",
+                    file=sys.stderr,
+                )
+                continue
+            per_resource[str(rid)] = per_resource_margin * own_quantile
+        block["per_resource"] = per_resource
+        block["margin_multiplier"] = per_resource_margin
+    return block
 
 
 def bake(
@@ -105,6 +172,7 @@ def bake(
     quantile: float = 0.99,
     data_format: str | None = None,
     output: str | None = None,
+    per_resource_margin: float | None = None,
 ) -> dict[str, Any]:
     """Bake a serving threshold into a checkpoint and write it out.
 
@@ -115,6 +183,8 @@ def bake(
         quantile: Healthy-window quantile for the threshold.
         data_format: Optional explicit file format override.
         output: Where to write the updated checkpoint; defaults to in place.
+        per_resource_margin: When set, also bake per-resource thresholds of
+            ``margin x own_quantile`` (see :func:`compute_serving_block`).
 
     Returns:
         The serving block that was written.
@@ -135,7 +205,9 @@ def bake(
             "threshold will not match what the model sees on complete data.",
             file=sys.stderr,
         )
-    serving = compute_serving_block(keeper, df_long, quantile=quantile, step=step)
+    serving = compute_serving_block(
+        keeper, df_long, quantile=quantile, step=step, per_resource_margin=per_resource_margin
+    )
 
     checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
     checkpoint["serving"] = serving
@@ -169,6 +241,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Where to write the updated checkpoint (default: in place).",
     )
+    parser.add_argument(
+        "--per-resource-margin",
+        type=float,
+        default=None,
+        help=(
+            "Also bake per-resource thresholds of MARGIN x each resource's own "
+            "healthy quantile; unknown resources serve the global threshold."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -182,6 +263,7 @@ def main(argv: list[str] | None = None) -> int:
         quantile=args.quantile,
         data_format=args.format,
         output=args.output,
+        per_resource_margin=args.per_resource_margin,
     )
     fpr = serving["healthy_fpr"]
     fpr_str = f"{fpr:.4f}" if fpr is not None else "n/a"
@@ -189,6 +271,11 @@ def main(argv: list[str] | None = None) -> int:
         f"serving threshold={serving['threshold']:.6f} q={serving['quantile']} "
         f"healthy_fpr={fpr_str} n_calibration_windows={serving['n_calibration_windows']}"
     )
+    if "per_resource" in serving:
+        print(
+            f"per-resource thresholds: {len(serving['per_resource'])} resource(s) "
+            f"at margin {serving['margin_multiplier']}"
+        )
     return 0
 
 

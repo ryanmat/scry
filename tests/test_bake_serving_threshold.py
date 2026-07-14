@@ -72,3 +72,107 @@ def test_bake_empty_capture_errors_clearly(keeper_path: str, tmp_path: Path) -> 
     short_csv = write_csv(df, tmp_path / "short.csv")
     with pytest.raises(ValueError, match="no windows"):
         bake_mod.bake(keeper_path, short_csv, profile=PROFILE, output=str(tmp_path / "x.pt"))
+
+
+# -- per-resource thresholds --
+
+
+def _two_resource_csv(tmp_path: Path) -> str:
+    import pandas as pd
+
+    df_a, _ = gen_capture("node-a", 600, seed=31)
+    df_b, _ = gen_capture("node-b", 600, seed=32)
+    return write_csv(pd.concat([df_a, df_b], ignore_index=True), tmp_path / "fleet.csv")
+
+
+def test_bake_per_resource_margin_writes_map(keeper_path: str, tmp_path: Path) -> None:
+    """--per-resource-margin writes a per-resource threshold map plus the margin."""
+    healthy = _two_resource_csv(tmp_path)
+    out = str(tmp_path / "pr.pt")
+    serving = bake_mod.bake(
+        keeper_path, healthy, profile=PROFILE, per_resource_margin=2.0, output=out
+    )
+
+    assert serving["margin_multiplier"] == 2.0
+    per_resource = serving["per_resource"]
+    assert set(per_resource) == {"node-a", "node-b"}
+    for threshold in per_resource.values():
+        assert threshold > 0.0
+    # The global fields are unchanged by the flag.
+    plain = bake_mod.bake(
+        keeper_path, healthy, profile=PROFILE, output=str(tmp_path / "plain.pt")
+    )
+    assert serving["threshold"] == plain["threshold"]
+
+    ckpt = torch.load(out, map_location="cpu", weights_only=False)
+    assert ckpt["serving"] == serving
+
+
+def test_bake_per_resource_values_scale_with_margin(keeper_path: str, tmp_path: Path) -> None:
+    """The margin multiplies each resource's own healthy quantile linearly."""
+    healthy = _two_resource_csv(tmp_path)
+    one = bake_mod.bake(
+        keeper_path, healthy, profile=PROFILE, per_resource_margin=1.0,
+        output=str(tmp_path / "m1.pt"),
+    )
+    two = bake_mod.bake(
+        keeper_path, healthy, profile=PROFILE, per_resource_margin=2.0,
+        output=str(tmp_path / "m2.pt"),
+    )
+    for rid in one["per_resource"]:
+        assert two["per_resource"][rid] == pytest.approx(2.0 * one["per_resource"][rid])
+
+
+def test_bake_default_has_no_per_resource(keeper_path: str, tmp_path: Path) -> None:
+    """Without the flag the serving block keeps its original shape."""
+    healthy = _healthy_csv(tmp_path)
+    serving = bake_mod.bake(keeper_path, healthy, profile=PROFILE, output=str(tmp_path / "d.pt"))
+    assert "per_resource" not in serving
+    assert "margin_multiplier" not in serving
+
+
+def test_bake_per_resource_skips_unwindowable_resource(keeper_path: str, tmp_path: Path) -> None:
+    """A resource too short to window falls back to the global threshold (omitted from the map)."""
+    import pandas as pd
+
+    df_a, _ = gen_capture("node-a", 600, seed=33)
+    df_short, _ = gen_capture("node-short", 10, seed=34)  # shorter than seq_len
+    healthy = write_csv(pd.concat([df_a, df_short], ignore_index=True), tmp_path / "mix.csv")
+    serving = bake_mod.bake(
+        keeper_path, healthy, profile=PROFILE, per_resource_margin=2.0,
+        output=str(tmp_path / "mix.pt"),
+    )
+    assert "node-a" in serving["per_resource"]
+    assert "node-short" not in serving["per_resource"]
+
+
+def test_bake_per_resource_omits_divergent_coverage(keeper_path: str, tmp_path: Path) -> None:
+    """A resource missing a trained feature the capture supplies elsewhere is omitted.
+
+    Its bake-time windows would carry that column at -mean/std (capture-wide absent
+    masking) while the single-resource serving path fills it neutral, so its baked
+    quantile would sit on a scale serving never produces.
+    """
+    import pandas as pd
+
+    df_a, _ = gen_capture("node-a", 600, seed=41)
+    df_b, _ = gen_capture("node-b", 600, seed=42)
+    df_b = df_b[df_b["metric_name"] != "cpuUsageNanoCores"]
+    healthy = write_csv(pd.concat([df_a, df_b], ignore_index=True), tmp_path / "hetero.csv")
+    serving = bake_mod.bake(
+        keeper_path, healthy, profile=PROFILE, per_resource_margin=2.0,
+        output=str(tmp_path / "hetero.pt"),
+    )
+    assert "node-a" in serving["per_resource"]
+    assert "node-b" not in serving["per_resource"]
+
+
+def test_bake_rejects_non_finite_or_non_positive_margin(keeper_path: str, tmp_path: Path) -> None:
+    """NaN, inf, zero, and negative margins are rejected before any windowing."""
+    healthy = _healthy_csv(tmp_path)
+    for bad in (float("nan"), float("inf"), 0.0, -2.0):
+        with pytest.raises(ValueError, match="margin"):
+            bake_mod.bake(
+                keeper_path, healthy, profile=PROFILE, per_resource_margin=bad,
+                output=str(tmp_path / "bad.pt"),
+            )
