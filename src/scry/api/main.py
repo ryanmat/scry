@@ -437,7 +437,9 @@ def create_app(model_path: str | None = None) -> FastAPI:
             # Score the fetched long-format frame directly through the shared
             # windowing (the same path the threshold was baked on), so the metrics
             # are aligned on one timestamp grid rather than flattened per metric.
-            result = app.state.predictor.score_reconstruction(df)
+            # The resolved canonical id (not the query string, which may be a
+            # substring) selects any baked per-resource threshold.
+            result = app.state.predictor.score_reconstruction(df, resource_id=ids[0])
             span.set_attribute("reconstruction.is_anomaly", result["is_anomaly"])
             return ReconstructionResponse(
                 resource_id=resource_id,

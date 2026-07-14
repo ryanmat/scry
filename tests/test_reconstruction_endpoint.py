@@ -426,3 +426,143 @@ def test_response_keys_cover_datasource(serving_keeper_path: str, monkeypatch) -
     data = client.post("/anomaly/reconstruction", json=_body()).json()
     for key in ("ratio", "is_anomaly", "severity"):
         assert key in data
+
+
+# -- per-resource threshold resolution --
+
+
+def _keeper_with_per_resource(serving_keeper_path: str, tmp_path: Path, per_resource: dict) -> str:
+    """Copy the serving keeper with a per_resource map injected into its serving block."""
+    import torch
+
+    ckpt = torch.load(serving_keeper_path, map_location="cpu", weights_only=False)
+    ckpt["serving"] = dict(ckpt["serving"], per_resource=per_resource, margin_multiplier=2.0)
+    out = str(tmp_path / "per_resource_keeper.pt")
+    torch.save(ckpt, out)
+    return out
+
+
+def _scoreable_frame(predictor: Predictor, resource_id: str) -> pd.DataFrame:
+    seq_len = int(predictor.config["seq_len"])
+    ts = pd.date_range("2026-01-01T00:00:00Z", periods=seq_len + 5, freq="1min")
+    rows = [
+        {"resource_id": resource_id, "metric_name": "cpuUsageNanoCores", "timestamp": t, "value": 1e8}
+        for t in ts
+    ]
+    return pd.DataFrame(rows)
+
+
+def test_per_resource_threshold_used_for_known_resource(
+    serving_keeper_path: str, tmp_path: Path, monkeypatch
+) -> None:
+    """A resource in the per_resource map is scored against its own threshold."""
+    monkeypatch.delenv("SCRY_RECON_THRESHOLD", raising=False)
+    path = _keeper_with_per_resource(serving_keeper_path, tmp_path, {"node-a": 0.007})
+    predictor = Predictor(path)
+    result = predictor.score_reconstruction(
+        _scoreable_frame(predictor, "node-a"), resource_id="node-a"
+    )
+    assert result["threshold"] == pytest.approx(0.007)
+    assert result["ratio"] == pytest.approx(result["reconstruction_error"] / 0.007)
+
+
+def test_unknown_resource_falls_back_to_global(
+    serving_keeper_path: str, tmp_path: Path, monkeypatch
+) -> None:
+    """A resource missing from the map is scored against the global serving threshold."""
+    monkeypatch.delenv("SCRY_RECON_THRESHOLD", raising=False)
+    path = _keeper_with_per_resource(serving_keeper_path, tmp_path, {"node-a": 0.007})
+    predictor = Predictor(path)
+    global_threshold = predictor.recon_threshold
+    result = predictor.score_reconstruction(
+        _scoreable_frame(predictor, "node-z"), resource_id="node-z"
+    )
+    assert result["threshold"] == pytest.approx(global_threshold)
+
+
+def test_env_override_beats_per_resource(
+    serving_keeper_path: str, tmp_path: Path, monkeypatch
+) -> None:
+    """SCRY_RECON_THRESHOLD overrides the per-resource map as well as the global."""
+    monkeypatch.setenv("SCRY_RECON_THRESHOLD", "0.5")
+    path = _keeper_with_per_resource(serving_keeper_path, tmp_path, {"node-a": 0.007})
+    predictor = Predictor(path)
+    result = predictor.score_reconstruction(
+        _scoreable_frame(predictor, "node-a"), resource_id="node-a"
+    )
+    assert result["threshold"] == pytest.approx(0.5)
+
+
+def test_no_resource_context_uses_global(
+    serving_keeper_path: str, tmp_path: Path, monkeypatch
+) -> None:
+    """The body path (no resolved resource identity) keeps the global threshold."""
+    monkeypatch.delenv("SCRY_RECON_THRESHOLD", raising=False)
+    path = _keeper_with_per_resource(serving_keeper_path, tmp_path, {"node-a": 0.007})
+    predictor = Predictor(path)
+    global_threshold = predictor.recon_threshold
+    result = predictor.score_reconstruction(_scoreable_frame(predictor, "node-a"))
+    assert result["threshold"] == pytest.approx(global_threshold)
+
+
+def test_invalid_per_resource_entries_dropped(
+    serving_keeper_path: str, tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """Non-numeric and non-positive per-resource entries are dropped with a warning."""
+    monkeypatch.delenv("SCRY_RECON_THRESHOLD", raising=False)
+    path = _keeper_with_per_resource(
+        serving_keeper_path, tmp_path, {"node-a": -1.0, "node-b": "junk"}
+    )
+    with caplog.at_level("WARNING", logger="scry.api.predictor"):
+        predictor = Predictor(path)
+    assert predictor.recon_thresholds_per_resource == {}
+    assert "per-resource" in caplog.text.lower()
+
+
+def test_lookup_passes_resolved_resource_id(serving_keeper_path: str) -> None:
+    """The lookup endpoint scores with the canonical resolved id, not the query string."""
+    df = pd.DataFrame({"resource_id": ["full-canonical-node-name"]})
+    canned = {
+        "reconstruction_error": 0.1,
+        "threshold": 0.12,
+        "ratio": 0.83,
+        "is_anomaly": False,
+        "severity": 1,
+        "coverage": 1.0,
+    }
+    client = _make_client(serving_keeper_path)
+    with (
+        patch("scry.api.main._resource_metrics", new=AsyncMock(return_value=df)),
+        patch.object(Predictor, "score_reconstruction", return_value=canned) as mock_score,
+    ):
+        resp = client.get("/anomaly/reconstruction/lookup?resource_id=canonical")
+    assert resp.status_code == 200
+    assert mock_score.call_args.kwargs["resource_id"] == "full-canonical-node-name"
+
+
+def test_non_finite_per_resource_entries_dropped(
+    serving_keeper_path: str, tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """An inf per-resource threshold is dropped (it would silently disable detection)."""
+    monkeypatch.delenv("SCRY_RECON_THRESHOLD", raising=False)
+    path = _keeper_with_per_resource(serving_keeper_path, tmp_path, {"node-a": float("inf")})
+    with caplog.at_level("WARNING", logger="scry.api.predictor"):
+        predictor = Predictor(path)
+    assert predictor.recon_thresholds_per_resource == {}
+
+
+def test_invalid_env_warns_once_not_per_request(
+    serving_keeper_path: str, tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """An invalid env override warns once at init, not on every scored request."""
+    monkeypatch.setenv("SCRY_RECON_THRESHOLD", "not-a-number")
+    path = _keeper_with_per_resource(serving_keeper_path, tmp_path, {"node-a": 0.007})
+    with caplog.at_level("WARNING", logger="scry.api.predictor"):
+        predictor = Predictor(path)
+        frame = _scoreable_frame(predictor, "node-a")
+        for _ in range(3):
+            result = predictor.score_reconstruction(frame, resource_id="node-a")
+    env_warnings = [r for r in caplog.records if "SCRY_RECON_THRESHOLD" in r.getMessage()]
+    assert len(env_warnings) == 1
+    # The invalid override is treated as unset, so the per-resource threshold applies.
+    assert result["threshold"] == pytest.approx(0.007)
