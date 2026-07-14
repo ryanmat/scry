@@ -316,7 +316,6 @@
 // Description: Collects predictions from Scry Predictive API.
 // Description: Stores prediction state as metrics on the resource.
 
-import com.santaba.agent.groovyapi.http.*
 import groovy.json.JsonSlurper
 
 // Configuration
@@ -341,12 +340,14 @@ try {
     def encodedResourceId = URLEncoder.encode(resourceId, "UTF-8")
 
     // Make HTTP request
-    def httpClient = HTTP.open(apiUrl, timeout)
-    def response = httpClient.get("/predict/lookup?resource_id=${encodedResourceId}")
+    def conn = new URL("${apiUrl}/predict/lookup?resource_id=${encodedResourceId}").openConnection()
+    conn.setConnectTimeout(timeout)
+    conn.setReadTimeout(timeout)
+    def status = conn.getResponseCode()
     def responseTime = System.currentTimeMillis() - startTime
 
-    if (response.getStatusCode() == 200) {
-        def json = new JsonSlurper().parseText(response.getBody())
+    if (status == 200) {
+        def json = new JsonSlurper().parseText(conn.getInputStream().getText("UTF-8"))
 
         // Extract values
         def clusterId = json.cluster_id ?: 0

@@ -316,7 +316,6 @@
 // Description: Collects the Scry X-DEC reconstruction-anomaly score for this resource.
 // Description: Polls /anomaly/reconstruction/lookup and emits the error/threshold ratio and flag.
 
-import com.santaba.agent.groovyapi.http.*
 import groovy.json.JsonSlurper
 
 // Configuration
@@ -329,12 +328,14 @@ try {
 
     // Score this resource's most recent window via the reconstruction endpoint.
     def encodedResourceId = URLEncoder.encode(resourceId, "UTF-8")
-    def httpClient = HTTP.open(apiUrl, timeout)
-    def response = httpClient.get("/anomaly/reconstruction/lookup?resource_id=${encodedResourceId}")
+    def conn = new URL("${apiUrl}/anomaly/reconstruction/lookup?resource_id=${encodedResourceId}").openConnection()
+    conn.setConnectTimeout(timeout)
+    conn.setReadTimeout(timeout)
+    def status = conn.getResponseCode()
     def responseTime = System.currentTimeMillis() - startTime
 
-    if (response.getStatusCode() == 200) {
-        def json = new JsonSlurper().parseText(response.getBody())
+    if (status == 200) {
+        def json = new JsonSlurper().parseText(conn.getInputStream().getText("UTF-8"))
 
         def isAnomaly = json.is_anomaly ? 1 : 0
         // ratio is null until a healthy threshold is baked, or when the window was too
@@ -359,7 +360,6 @@ try {
         // per-resource conditions on a healthy API. A 503 (model not loaded or no data
         // source) or any other 5xx means the service cannot serve, so it is reported
         // unhealthy; a genuine connection failure is caught below.
-        def status = response.getStatusCode()
         def apiStatus = (status == 404 || status == 409) ? 1 : 0
         println "IsAnomaly=0"
         println "AnomalyScore=0"

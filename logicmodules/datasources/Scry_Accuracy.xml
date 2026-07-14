@@ -876,7 +876,6 @@
 // Description: Collects forecast accuracy metrics from Scry API.
 // Description: Stores per-horizon and stability metrics on the resource.
 
-import com.santaba.agent.groovyapi.http.*
 import groovy.json.JsonSlurper
 
 // Configuration
@@ -887,12 +886,14 @@ try {
     def startTime = System.currentTimeMillis()
 
     // Make HTTP request to accuracy endpoint
-    def httpClient = HTTP.open(apiUrl, timeout)
-    def response = httpClient.get("/accuracy")
+    def conn = new URL("${apiUrl}/accuracy").openConnection()
+    conn.setConnectTimeout(timeout)
+    conn.setReadTimeout(timeout)
+    def status = conn.getResponseCode()
     def responseTime = System.currentTimeMillis() - startTime
 
-    if (response.getStatusCode() == 200) {
-        def json = new JsonSlurper().parseText(response.getBody())
+    if (status == 200) {
+        def json = new JsonSlurper().parseText(conn.getInputStream().getText("UTF-8"))
 
         // Per-horizon metrics
         ["15m", "1h", "4h", "24h"].each { horizon ->

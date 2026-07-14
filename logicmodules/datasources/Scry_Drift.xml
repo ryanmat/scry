@@ -419,7 +419,6 @@
 // Description: Collects drift metrics from Scry API /drift endpoint.
 // Description: Stores PSI and ADWIN drift detection results as DataSource metrics.
 
-import com.santaba.agent.groovyapi.http.*
 import groovy.json.JsonSlurper
 
 // Configuration
@@ -430,12 +429,14 @@ try {
     def startTime = System.currentTimeMillis()
 
     // Make HTTP request to drift endpoint
-    def httpClient = HTTP.open(apiUrl, timeout)
-    def response = httpClient.get("/drift")
+    def conn = new URL("${apiUrl}/drift").openConnection()
+    conn.setConnectTimeout(timeout)
+    conn.setReadTimeout(timeout)
+    def status = conn.getResponseCode()
     def responseTime = System.currentTimeMillis() - startTime
 
-    if (response.getStatusCode() == 200) {
-        def json = new JsonSlurper().parseText(response.getBody())
+    if (status == 200) {
+        def json = new JsonSlurper().parseText(conn.getInputStream().getText("UTF-8"))
 
         def featureDrift = json.feature_drift ?: [:]
         def predictionDrift = json.prediction_drift ?: [:]
