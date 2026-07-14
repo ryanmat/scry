@@ -3,7 +3,7 @@
 
 [project]
 name = "scryml"
-version = "0.1.0"
+version = "0.2.0"
 description = "Predict infrastructure failure states from a stream of metrics"
 readme = "README.md"
 license = "Apache-2.0"

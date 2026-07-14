@@ -3,4 +3,4 @@
 
 """Scry: predict infrastructure failure states from a stream of metrics."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

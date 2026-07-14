@@ -39,7 +39,7 @@ logging.basicConfig(
 )
 
 # API version
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 # Lookback for the reconstruction lookup: only the most recent seq_len samples are
 # scored, so a short window keeps the object-store fetch small.
