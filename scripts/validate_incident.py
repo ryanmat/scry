@@ -45,6 +45,7 @@ from scry.data.feature_engineering import set_active_profile
 from scry.data.fetcher import fetch_full_capture
 from scry.data.quality import missing_features
 from scry.data.windowing import WindowSet, build_windows
+from scry.eval.detection import anomaly_runs
 from scry.model.checkpoint import Keeper, load_keeper
 from scry.model.reconstruction import reconstruction_errors, time_split
 from scry.utils.config import get_config
@@ -93,29 +94,9 @@ def load_incidents(labels_path: str) -> list[Incident]:
     return incidents
 
 
-def _anomaly_runs(flags: np.ndarray, sustain: int) -> list[tuple[int, int]]:
-    """Maximal runs of consecutive True flags with length >= ``sustain``.
-
-    Args:
-        flags: Boolean array of per-window anomaly flags, in time order.
-        sustain: Minimum run length to qualify.
-
-    Returns:
-        List of (start_index, end_index) inclusive, one per qualifying run.
-    """
-    runs: list[tuple[int, int]] = []
-    i, n = 0, len(flags)
-    while i < n:
-        if flags[i]:
-            j = i
-            while j + 1 < n and flags[j + 1]:
-                j += 1
-            if j - i + 1 >= sustain:
-                runs.append((i, j))
-            i = j + 1
-        else:
-            i += 1
-    return runs
+# Run extraction lives in the eval package; the alias keeps this script's
+# public surface (and its callers) unchanged.
+_anomaly_runs = anomaly_runs
 
 
 def _select_detection(
