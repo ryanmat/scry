@@ -54,8 +54,20 @@ with fleet size.
   detection lead, no pre-onset bridging, lead-in and sustained false-positive rates,
   clean negative controls, and coverage integrity. Candidates score against the suite of
   labeled captures and healthy references, and promotion to serving is a rubric pass
-  rather than a judgment call. The scoring backbone stays pluggable; adopting any
-  alternative backbone is a harness verdict, not a roadmap commitment.
+  rather than a judgment call. Those gates are operational and threshold-bound, so a
+  threshold-independent score rides alongside them as a reported secondary that gates
+  nothing: VUS-PR, the volume under the surface of the precision-recall curve over a
+  range of temporal tolerances, which keeps results comparable to the published
+  time-series anomaly detection literature without importing its habit of scoring a
+  detector at its single best threshold. The scoring backbone stays pluggable; adopting
+  any alternative backbone is a harness verdict, not a roadmap commitment.
+- Evaluation data beyond one fleet's induced captures. A handful of self-induced ramps
+  fixes the false-positive side but leaves recall with almost no denominator, so the
+  suite grows to public labeled datasets whose anomalies are independent of each other
+  and of us. Exathlon (Spark cluster traces, six injected anomaly types, root-cause and
+  extended-effect intervals) is the first candidate and is close in shape to the
+  infrastructure case; its data is licensed for non-commercial use, so it is an
+  evaluation input that is never redistributed here, like every other capture.
 - Multi-fleet training and serving for a single resource type: fleet-unique
   resource_ids, capacity-relative feature variants in the profiles, per-resource
   thresholds on by default, and labeled captures from more than one fleet in the
