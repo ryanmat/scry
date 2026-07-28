@@ -182,6 +182,50 @@ class TestSelectDetectionLookback:
             select_detection([], _GRID, _ONSET, mode="sideways")
 
 
+class TestSelectDetectionNoBridging:
+    def test_lone_bridging_run_is_not_a_detection(self) -> None:
+        """A run beginning pre-onset and continuing past onset is reported, not credited."""
+        result = select_detection(
+            [(_ts("01:50"), _ts("02:10"))], _GRID, _ONSET, mode="no_bridging"
+        )
+        assert not result.detected
+        assert result.detection_time is None
+        assert result.lead_seconds is None
+        assert result.bridged
+        assert (result.n_runs_pre_onset, result.n_runs_at_or_after) == (1, 0)
+
+    def test_post_onset_run_after_bridging_run_detects_at_post_onset_start(self) -> None:
+        spans = [(_ts("01:50"), _ts("02:10")), (_ts("02:20"), _ts("02:35"))]
+        result = select_detection(spans, _GRID, _ONSET, mode="no_bridging")
+        assert result.detected
+        assert result.detection_time == _ts("02:20")
+        assert result.lead_seconds == -1200.0
+        assert result.bridged
+        assert (result.n_runs_pre_onset, result.n_runs_at_or_after) == (1, 1)
+
+    def test_run_starting_exactly_at_onset_counts_as_at_or_after(self) -> None:
+        result = select_detection(
+            [(_ts("02:00"), _ts("02:15"))], _GRID, _ONSET, mode="no_bridging"
+        )
+        assert result.detected
+        assert result.detection_time == _ONSET
+        assert result.lead_seconds == 0.0
+        assert not result.bridged
+
+    def test_partition_is_strictly_by_start(self) -> None:
+        """Three-run fixture: recovered blip, bridging run, post-onset run."""
+        spans = [
+            (_ts("01:00"), _ts("01:10")),
+            (_ts("01:55"), _ts("02:05")),
+            (_ts("02:30"), _ts("02:45")),
+        ]
+        result = select_detection(spans, _GRID, _ONSET, mode="no_bridging")
+        assert result.detected
+        assert result.detection_time == _ts("02:30")
+        assert result.bridged
+        assert (result.n_runs_pre_onset, result.n_runs_at_or_after) == (2, 1)
+
+
 class TestTorchFreeImport:
     def _assert_torch_free(self, module: str) -> None:
         proc = subprocess.run(

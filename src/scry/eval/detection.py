@@ -54,6 +54,12 @@ def select_detection(
     detection with non-positive lead. ``detected=True`` therefore does not imply
     early warning.
 
+    mode="no_bridging": runs partition strictly by START (pre_onset when start
+    < onset, at_or_after when start >= onset); detected iff at_or_after is
+    non-empty, credited at the first at_or_after start. A run that begins
+    pre-onset and continues past onset is never a detection; it sets
+    ``bridged``, which is reported, not silently skipped.
+
     Args:
         spans: Sustained anomalous runs as (start_time, end_time), time-ordered.
         scan_ts: The scanned window end-times (for the inter-window step).
@@ -67,7 +73,7 @@ def select_detection(
     Raises:
         ValueError: On an unknown ``mode``.
     """
-    if mode != "lookback":
+    if mode not in ("lookback", "no_bridging"):
         raise ValueError(f"unknown detection mode {mode!r}")
 
     n_pre = sum(1 for span in spans if span[0] < onset)
@@ -75,14 +81,23 @@ def select_detection(
     bridged = any(span[0] < onset and span[1] >= onset for span in spans)
 
     detection_time: pd.Timestamp | None = None
-    step = pd.Timedelta(np.median(np.diff(scan_ts.values))) if len(scan_ts) > 1 else pd.Timedelta(0)
-    leading = [span for span in spans if span[0] <= onset and span[1] >= onset - step]
-    if leading:
-        detection_time = min(leading, key=lambda span: span[0])[0]
+    if mode == "lookback":
+        step = (
+            pd.Timedelta(np.median(np.diff(scan_ts.values)))
+            if len(scan_ts) > 1
+            else pd.Timedelta(0)
+        )
+        leading = [span for span in spans if span[0] <= onset and span[1] >= onset - step]
+        if leading:
+            detection_time = min(leading, key=lambda span: span[0])[0]
+        else:
+            after = [span for span in spans if span[1] >= onset]
+            if after:
+                detection_time = min(after, key=lambda span: span[0])[0]
     else:
-        after = [span for span in spans if span[1] >= onset]
-        if after:
-            detection_time = min(after, key=lambda span: span[0])[0]
+        at_or_after = [span for span in spans if span[0] >= onset]
+        if at_or_after:
+            detection_time = min(at_or_after, key=lambda span: span[0])[0]
 
     if detection_time is None:
         return DetectionResult(False, None, None, bridged, n_pre, n_after)
