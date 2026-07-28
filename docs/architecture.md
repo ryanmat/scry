@@ -13,6 +13,8 @@ Scry reads metrics, learns what healthy looks like, scores each resource's recon
 
 The validated serving signal. `scripts/bake_serving_threshold.py` persists a healthy-quantile threshold into the checkpoint; `/anomaly/reconstruction` scores the latest full window through the same windowing path the threshold was calibrated on and returns the error as a ratio of that threshold. Windows shorter than `seq_len` or without numerical coverage are reported not-scored rather than padded, so cold starts and collection outages never fabricate a score. `scripts/validate_incident.py` measures detection lead time against a labeled incident capture.
 
+The signal is a transition detector. Reconstruction error is high while a window mixes healthy and abnormal content and falls again once the window is uniformly abnormal, because a saturated window reconstructs well. In a sustained incident the alarm therefore raises early and clears while the incident is still running. Scry tells an operator that a resource is departing its learned normal, not that it is currently unhealthy; pair it with conventional threshold alerts, which latch on the steady state that the transition leads into.
+
 ## The five states
 
 `NORMAL`, `PRE_SCALE`, `PRE_FAILURE`, `ACTIVE_DEGRADATION`, `ANOMALY`. Each carries a recommended action and priority; see the `/clusters` endpoint. The states are discovered by unsupervised clustering and the labels are nominal: they are not yet grounded on labeled incidents, and a model trained only on healthy data partitions healthy operating space rather than failure modes. Treat cluster output as exploratory until validated against real incidents; the reconstruction signal above is the alerting path.

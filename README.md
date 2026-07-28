@@ -10,7 +10,7 @@
 
 </div>
 
-Scry predicts infrastructure failure states from a stream of metrics. It learns what healthy looks like, scores each resource's reconstruction error against a threshold calibrated on healthy data, and alarms before degradation; an incident-validation harness measures how early (the detection lead time). It also forecasts where the metrics are headed and discovers operational states by unsupervised clustering. It is data-source agnostic and runs offline. No trained weights ship.
+Scry is an early-warning transition detector for infrastructure metrics. It learns what healthy looks like, scores each resource's reconstruction error against a threshold calibrated on healthy data, and alarms while a resource departs its learned normal, ahead of conventional threshold alerts; an incident-validation harness measures how early (the detection lead time). It also forecasts where the metrics are headed and discovers operational states by unsupervised clustering. It is data-source agnostic and runs offline. No trained weights ship.
 
 Currently being used for LogicMonitor metric predictions.
 The default path reads Parquet or CSV from local files or object storage. Everything normalizes to one canonical long-format table, so any metric source works once it is in that shape.
@@ -19,7 +19,7 @@ Shout out to my MTG heads.
 
 <table>
 <tr><td><b>The X-DEC model</b></td><td>A dual-encoder temporal VAE plus deep embedded clustering, pure PyTorch, no cloud dependencies. Trains on your own windowed metrics from scratch.</td></tr>
-<tr><td><b>Reconstruction anomaly signal</b></td><td>The validated serving signal: per-window reconstruction error as a ratio of a threshold baked from healthy windows (<code>scripts/bake_serving_threshold.py</code>), served at <code>/anomaly/reconstruction</code>. Windows too short or without numerical coverage are reported not-scored, never padded into a false alarm.</td></tr>
+<tr><td><b>Reconstruction anomaly signal</b></td><td>The validated serving signal: per-window reconstruction error as a ratio of a threshold baked from healthy windows (<code>scripts/bake_serving_threshold.py</code>), served at <code>/anomaly/reconstruction</code>. Windows too short or without numerical coverage are reported not-scored, never padded into a false alarm. The alarm marks the transition into an abnormal regime, not the regime itself: a uniformly saturated window reconstructs well and clears the alarm even while the incident continues, so Scry composes with conventional threshold alerts, which own the steady state.</td></tr>
 <tr><td><b>Operational-state discovery</b></td><td>Deep embedded clustering discovers five nominal states: NORMAL, PRE_SCALE, PRE_FAILURE, ACTIVE_DEGRADATION, ANOMALY. The labels are unsupervised and not yet grounded on labeled incidents, so on healthy-trained models cluster-derived alerting stays disabled and the reconstruction signal is authoritative.</td></tr>
 <tr><td><b>Forecasting</b></td><td>An optional Chronos layer (<code>scryml[forecast]</code>) projects where each metric is headed across multiple horizons, kept behind an extra so the core stays offline-capable.</td></tr>
 <tr><td><b>Data-source agnostic</b></td><td>Read Parquet or CSV from local disk or object storage (S3, GCS, ADLS, MinIO) through DuckDB. A LogicMonitor REST exporter lives behind <code>scryml[logicmonitor]</code>.</td></tr>
