@@ -23,7 +23,7 @@
       <collectMethod>script</collectMethod>
       <hasMultiInstances>false</hasMultiInstances>
       <useWildValueAsUniqueIdentifier>false</useWildValueAsUniqueIdentifier>
-      <collectInterval>5</collectInterval>
+      <collectInterval>2</collectInterval>
       <dataPoints>
         <dataPoint>
           <id></id>
@@ -134,8 +134,8 @@
           <useValue>output</useValue>
           <alertTransitionInterval>0</alertTransitionInterval>
           <alertClearTransitionInterval>0</alertClearTransitionInterval>
-          <alertExpr>&gt;= 4 error &gt;= 2 warn</alertExpr>
-          <alertExprNote>Severity from the reconstruction ratio: warn at &gt;= 2 (ratio &gt; 1), error at 4 (ratio &gt; 2), matching AnomalyScore's warn/error boundaries.</alertExprNote>
+          <alertExpr></alertExpr>
+          <alertExprNote></alertExprNote>
           <alertSubject></alertSubject>
           <alertBody></alertBody>
           <enableAnomalyAlertSuppression></enableAnomalyAlertSuppression>
