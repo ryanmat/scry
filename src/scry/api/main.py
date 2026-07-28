@@ -362,6 +362,7 @@ def create_app(model_path: str | None = None) -> FastAPI:
         result = app.state.predictor.reconstruction_error(
             numerical_metrics=request.numerical_metrics,
             categorical_metrics=request.categorical_metrics,
+            resource_id=request.resource_id,
         )
         return ReconstructionResponse(
             resource_id=request.resource_id,

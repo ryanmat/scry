@@ -46,6 +46,7 @@ def _severity_from_ratio(ratio: float) -> int:
 def _frame_from_series(
     numerical_metrics: dict[str, list[float]],
     categorical_metrics: dict[str, list[int]],
+    resource_id: str | None = None,
 ) -> pd.DataFrame:
     """Build a canonical long-format frame from parallel request series.
 
@@ -53,7 +54,8 @@ def _frame_from_series(
     last) on a shared synthetic 1-minute grid, so unequal-length series land on one
     timeline the way a real capture would, rather than each being sliced
     independently. This is what lets the request path window and normalize
-    identically to the bake/validation path.
+    identically to the bake/validation path. Rows carry the caller's resource_id
+    when provided, a placeholder otherwise.
     """
     columns = ["resource_id", "metric_name", "timestamp", "value"]
     series = {**numerical_metrics, **categorical_metrics}
@@ -73,7 +75,7 @@ def _frame_from_series(
         for i, value in enumerate(values):
             rows.append(
                 {
-                    "resource_id": "request",
+                    "resource_id": resource_id if resource_id is not None else "request",
                     "metric_name": name,
                     "timestamp": grid[offset + i],
                     "value": float(value),
@@ -491,6 +493,7 @@ class Predictor:
         self,
         numerical_metrics: dict[str, list[float]],
         categorical_metrics: dict[str, list[int]],
+        resource_id: str | None = None,
     ) -> dict[str, Any]:
         """Score the latest reconstruction window from parallel request series.
 
@@ -501,11 +504,18 @@ class Predictor:
         Args:
             numerical_metrics: Dict of numerical metric time series.
             categorical_metrics: Dict of categorical metric time series.
+            resource_id: The caller-supplied resource identity; selects that
+                resource's baked per-resource threshold exactly as the lookup
+                path does (exact stringified match, global fallback, env
+                override supreme). See :meth:`score_reconstruction`.
 
         Returns:
             The score dict (see :meth:`score_reconstruction`).
         """
-        return self.score_reconstruction(_frame_from_series(numerical_metrics, categorical_metrics))
+        return self.score_reconstruction(
+            _frame_from_series(numerical_metrics, categorical_metrics, resource_id),
+            resource_id=resource_id,
+        )
 
     def score_reconstruction(
         self, df_long: pd.DataFrame, *, resource_id: str | None = None
