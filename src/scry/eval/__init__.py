@@ -15,6 +15,7 @@ from scry.eval.detection import (
     DetectionResult,
     anomaly_runs,
     select_detection,
+    slice_stats,
 )
 
 # name -> source module, resolved on first access by __getattr__ below.
@@ -40,4 +41,5 @@ __all__ = [
     "DetectionResult",
     "anomaly_runs",
     "select_detection",
+    "slice_stats",
 ]

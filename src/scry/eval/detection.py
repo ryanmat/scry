@@ -11,8 +11,9 @@ onset under either selection mode. Everything here is importable without torch.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -109,6 +110,48 @@ def select_detection(
         n_runs_pre_onset=n_pre,
         n_runs_at_or_after=n_after,
     )
+
+
+def slice_stats(
+    errors: np.ndarray,
+    end_times: pd.DatetimeIndex,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    thresholds: Sequence[float],
+    sustain: int,
+) -> dict[str, Any]:
+    """Error statistics and sustained-run counts for one resource over a slice.
+
+    Operates on ONE resource's arrays. Windows are ordered by end time with a
+    stable sort, so duplicate end times keep input order and the run counts are
+    deterministic. The slice is inclusive on both bounds.
+
+    Returns:
+        ``n_windows_in_slice``, ``max_error``/``mean_error`` (None on an empty
+        slice, never NaN), and one ``over_{threshold:.4f}`` entry per requested
+        threshold with ``windows_over``, ``frac_over``, and ``sustained_runs``.
+        Every key is present for every threshold regardless of slice content.
+    """
+    order = np.argsort(end_times.values, kind="stable")
+    ordered_errors = np.asarray(errors)[order]
+    ordered_ends = end_times[order]
+    in_slice = (ordered_ends >= start) & (ordered_ends <= end)
+    slice_errors = ordered_errors[in_slice]
+
+    stats: dict[str, Any] = {
+        "n_windows_in_slice": int(in_slice.sum()),
+        "max_error": float(slice_errors.max()) if slice_errors.size else None,
+        "mean_error": float(slice_errors.mean()) if slice_errors.size else None,
+    }
+    for threshold in thresholds:
+        flags = slice_errors > threshold
+        runs = anomaly_runs(flags, sustain) if slice_errors.size else []
+        stats[f"over_{threshold:.4f}"] = {
+            "windows_over": int(flags.sum()) if slice_errors.size else 0,
+            "frac_over": float(flags.mean()) if slice_errors.size else 0.0,
+            "sustained_runs": len(runs),
+        }
+    return stats
 
 
 def anomaly_runs(flags: np.ndarray, sustain: int) -> list[tuple[int, int]]:

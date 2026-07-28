@@ -20,7 +20,7 @@ import pandas as pd
 import pytest
 import validate_incident as vi
 
-from scry.eval.detection import SUSTAIN_DEFAULT, anomaly_runs, select_detection
+from scry.eval.detection import SUSTAIN_DEFAULT, anomaly_runs, select_detection, slice_stats
 
 
 def _flags(*bits: int) -> np.ndarray:
@@ -224,6 +224,89 @@ class TestSelectDetectionNoBridging:
         assert result.detection_time == _ts("02:30")
         assert result.bridged
         assert (result.n_runs_pre_onset, result.n_runs_at_or_after) == (2, 1)
+
+
+class TestSliceStats:
+    def test_hand_computed_pin(self) -> None:
+        errors = np.array([0.10, 0.30, 0.35, 0.32, 0.05])
+        end_times = pd.date_range("2026-01-01 00:00:00+00:00", periods=5, freq="1min")
+        result = slice_stats(
+            errors, end_times,
+            start=end_times[0], end=end_times[-1],
+            thresholds=[0.2], sustain=3,
+        )
+        assert result == {
+            "n_windows_in_slice": 5,
+            "max_error": 0.35,
+            "mean_error": pytest.approx(0.224),
+            "over_0.2000": {"windows_over": 3, "frac_over": 0.6, "sustained_runs": 1},
+        }
+
+    def test_empty_slice_contract(self) -> None:
+        """Every key present for every threshold; None for the stats, never NaN."""
+        errors = np.array([0.10, 0.30])
+        end_times = pd.DatetimeIndex(
+            [pd.Timestamp("2026-01-01 00:00+00:00"), pd.Timestamp("2026-01-01 00:01+00:00")]
+        )
+        result = slice_stats(
+            errors, end_times,
+            start=pd.Timestamp("2026-06-01 00:00+00:00"),
+            end=pd.Timestamp("2026-06-02 00:00+00:00"),
+            thresholds=[0.2, 0.5], sustain=3,
+        )
+        assert result == {
+            "n_windows_in_slice": 0,
+            "max_error": None,
+            "mean_error": None,
+            "over_0.2000": {"windows_over": 0, "frac_over": 0.0, "sustained_runs": 0},
+            "over_0.5000": {"windows_over": 0, "frac_over": 0.0, "sustained_runs": 0},
+        }
+
+    def test_unsorted_input_with_duplicate_end_times_is_deterministic(self) -> None:
+        """Stable argsort: duplicate end times keep input order, pinning the runs."""
+        end_times = pd.DatetimeIndex(
+            [
+                pd.Timestamp("2026-01-01 00:02+00:00"),
+                pd.Timestamp("2026-01-01 00:00+00:00"),
+                pd.Timestamp("2026-01-01 00:01+00:00"),
+                pd.Timestamp("2026-01-01 00:01+00:00"),
+            ]
+        )
+        errors = np.array([0.05, 0.30, 0.30, 0.05])
+        result = slice_stats(
+            errors, end_times,
+            start=end_times.min(), end=end_times.max(),
+            thresholds=[0.2], sustain=2,
+        )
+        # Stable order: 0.30 (00:00), 0.30 (first 00:01), 0.05 (second 00:01),
+        # 0.05 (00:02): one sustained run of length 2. A sort that swapped the
+        # duplicate end times would interleave to T,F,T,F and produce zero runs.
+        assert result["n_windows_in_slice"] == 4
+        assert result["over_0.2000"] == {
+            "windows_over": 2,
+            "frac_over": 0.5,
+            "sustained_runs": 1,
+        }
+
+    def test_one_key_per_threshold(self) -> None:
+        errors = np.array([0.10, 0.30, 0.35])
+        end_times = pd.date_range("2026-01-01 00:00:00+00:00", periods=3, freq="1min")
+        result = slice_stats(
+            errors, end_times,
+            start=end_times[0], end=end_times[-1],
+            thresholds=[0.05, 0.2, 0.999], sustain=1,
+        )
+        over_keys = sorted(k for k in result if k.startswith("over_"))
+        assert over_keys == ["over_0.0500", "over_0.2000", "over_0.9990"]
+        assert result["over_0.0500"]["windows_over"] == 3
+        assert result["over_0.9990"]["windows_over"] == 0
+
+
+class TestValidateIncidentAlias:
+    def test_anomaly_runs_alias_is_the_eval_implementation(self) -> None:
+        from scry.eval import detection
+
+        assert vi._anomaly_runs is detection.anomaly_runs
 
 
 class TestTorchFreeImport:
