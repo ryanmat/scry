@@ -9,7 +9,13 @@ use this package without pulling torch. Every name in ``__all__`` still
 resolves.
 """
 
-from scry.eval.detection import SUSTAIN_DEFAULT, anomaly_runs
+from scry.eval.detection import (
+    SUSTAIN_DEFAULT,
+    DetectionMode,
+    DetectionResult,
+    anomaly_runs,
+    select_detection,
+)
 
 # name -> source module, resolved on first access by __getattr__ below.
 _LAZY_EXPORTS: dict[str, str] = {}
@@ -30,5 +36,8 @@ def __dir__() -> list[str]:
 
 __all__ = [
     "SUSTAIN_DEFAULT",
+    "DetectionMode",
+    "DetectionResult",
     "anomaly_runs",
+    "select_detection",
 ]

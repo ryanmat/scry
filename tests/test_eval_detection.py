@@ -16,13 +16,24 @@ import subprocess
 import sys
 
 import numpy as np
+import pandas as pd
+import pytest
 import validate_incident as vi
 
-from scry.eval.detection import SUSTAIN_DEFAULT, anomaly_runs
+from scry.eval.detection import SUSTAIN_DEFAULT, anomaly_runs, select_detection
 
 
 def _flags(*bits: int) -> np.ndarray:
     return np.array(bits, dtype=bool)
+
+
+def _ts(hhmm: str) -> pd.Timestamp:
+    return pd.Timestamp(f"2026-01-01 {hhmm}:00+00:00")
+
+
+# A 5-minute scan grid spanning 00:00-03:55; onset fixed at 02:00 throughout.
+_GRID = pd.date_range("2026-01-01 00:00:00+00:00", periods=48, freq="5min")
+_ONSET = _ts("02:00")
 
 
 class TestAnomalyRunsPins:
@@ -93,6 +104,82 @@ class TestAnomalyRunsProperties:
             for start, end in anomaly_runs(flags, sustain):
                 assert start == 0 or not flags[start - 1]
                 assert end == len(flags) - 1 or not flags[end + 1]
+
+
+class TestSelectDetectionLookback:
+    def test_precursor_ramp_detected_with_positive_lead(self) -> None:
+        """(a) A sustained run starting before onset and reaching it leads."""
+        result = select_detection([(_ts("01:40"), _ts("02:05"))], _GRID, _ONSET, mode="lookback")
+        assert result.detected
+        assert result.detection_time == _ts("01:40")
+        assert result.lead_seconds == 1200.0
+        assert result.bridged
+        assert (result.n_runs_pre_onset, result.n_runs_at_or_after) == (1, 0)
+
+    def test_step_exactly_at_onset_leads_with_zero_lead(self) -> None:
+        """(b) A run starting exactly at onset IS leading, lead 0."""
+        result = select_detection([(_ts("02:00"), _ts("02:15"))], _GRID, _ONSET, mode="lookback")
+        assert result.detected
+        assert result.detection_time == _ONSET
+        assert result.lead_seconds == 0.0
+        assert not result.bridged
+        assert (result.n_runs_pre_onset, result.n_runs_at_or_after) == (0, 1)
+
+    def test_recovered_blip_not_credited_late_alarm_detected(self) -> None:
+        """(c) A blip recovered more than one step pre-onset never counts."""
+        spans = [(_ts("01:20"), _ts("01:35")), (_ts("02:10"), _ts("02:25"))]
+        result = select_detection(spans, _GRID, _ONSET, mode="lookback")
+        assert result.detected
+        assert result.detection_time == _ts("02:10")
+        assert result.lead_seconds == -600.0
+        assert not result.bridged
+        assert (result.n_runs_pre_onset, result.n_runs_at_or_after) == (1, 1)
+
+    def test_run_spanning_onset_credited_from_start(self) -> None:
+        """(d) A run spanning onset is credited from its START, lead 300.0."""
+        result = select_detection([(_ts("01:55"), _ts("02:05"))], _GRID, _ONSET, mode="lookback")
+        assert result.detected
+        assert result.detection_time == _ts("01:55")
+        assert result.lead_seconds == 300.0
+        assert result.bridged
+
+    def test_run_recovered_within_one_step_of_onset_still_leads(self) -> None:
+        """The bridge tolerance is one median inter-window step, not exact contact."""
+        result = select_detection([(_ts("01:45"), _ts("01:55"))], _GRID, _ONSET, mode="lookback")
+        assert result.detected
+        assert result.detection_time == _ts("01:45")
+        assert result.lead_seconds == 900.0
+
+    def test_degenerate_grid_uses_zero_step(self) -> None:
+        """step is 0 when len(scan_ts) <= 1: no bridge tolerance at all."""
+        one_ts = pd.DatetimeIndex([_ONSET])
+        at_onset = select_detection([(_ts("02:00"), _ts("02:00"))], one_ts, _ONSET, mode="lookback")
+        assert at_onset.detected
+        assert at_onset.lead_seconds == 0.0
+        just_before = select_detection(
+            [(_ts("01:50"), _ts("01:59"))], one_ts, _ONSET, mode="lookback"
+        )
+        assert not just_before.detected
+
+    def test_no_qualifying_run_yields_none_fields(self) -> None:
+        result = select_detection([(_ts("01:00"), _ts("01:10"))], _GRID, _ONSET, mode="lookback")
+        assert not result.detected
+        assert result.detection_time is None
+        assert result.lead_seconds is None
+        assert not result.bridged
+        assert (result.n_runs_pre_onset, result.n_runs_at_or_after) == (1, 0)
+
+    def test_empty_spans_yield_none_fields(self) -> None:
+        result = select_detection([], _GRID, _ONSET, mode="lookback")
+        assert not result.detected
+        assert result.detection_time is None
+        assert result.lead_seconds is None
+        assert not result.bridged
+        assert (result.n_runs_pre_onset, result.n_runs_at_or_after) == (0, 0)
+
+    def test_unknown_mode_rejected(self) -> None:
+        with pytest.raises(ValueError, match="mode"):
+            select_detection([], _GRID, _ONSET, mode="sideways")
 
 
 class TestTorchFreeImport:
