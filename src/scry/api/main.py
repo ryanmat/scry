@@ -213,10 +213,12 @@ def create_app(model_path: str | None = None) -> FastAPI:
 
         model_version = None
         recon_threshold = None
+        recon_per_resource_count = 0
         if app.state.predictor is not None:
             cfg = app.state.predictor.config
             model_version = f"xdec-k{cfg['n_clusters']}-d{cfg['latent_dim']}"
             recon_threshold = app.state.predictor.recon_threshold
+            recon_per_resource_count = len(app.state.predictor.recon_thresholds_per_resource)
         env_version = os.environ.get("MODEL_VERSION")
         if env_version:
             model_version = f"{model_version}-{env_version}" if model_version else env_version
@@ -234,6 +236,7 @@ def create_app(model_path: str | None = None) -> FastAPI:
             drift_configured=hasattr(app.state, "drift_detector"),
             forecast_anomaly_configured=hasattr(app.state, "anomaly_detector"),
             accuracy_configured=hasattr(app.state, "accuracy_tracker"),
+            recon_per_resource_count=recon_per_resource_count,
             uptime_seconds=round(uptime, 2),
         )
 
@@ -362,6 +365,7 @@ def create_app(model_path: str | None = None) -> FastAPI:
         result = app.state.predictor.reconstruction_error(
             numerical_metrics=request.numerical_metrics,
             categorical_metrics=request.categorical_metrics,
+            resource_id=request.resource_id,
         )
         return ReconstructionResponse(
             resource_id=request.resource_id,

@@ -496,7 +496,7 @@ def test_env_override_beats_per_resource(
 def test_no_resource_context_uses_global(
     serving_keeper_path: str, tmp_path: Path, monkeypatch
 ) -> None:
-    """The body path (no resolved resource identity) keeps the global threshold."""
+    """Scoring without a resource_id argument keeps the global threshold."""
     monkeypatch.delenv("SCRY_RECON_THRESHOLD", raising=False)
     path = _keeper_with_per_resource(serving_keeper_path, tmp_path, {"node-a": 0.007})
     predictor = Predictor(path)
@@ -566,3 +566,72 @@ def test_invalid_env_warns_once_not_per_request(
     assert len(env_warnings) == 1
     # The invalid override is treated as unset, so the per-resource threshold applies.
     assert result["threshold"] == pytest.approx(0.007)
+
+
+# -- POST per-resource threshold parity --
+
+
+def test_post_uses_per_resource_threshold_matching_lookup(
+    serving_keeper_path: str, tmp_path: Path, monkeypatch
+) -> None:
+    """POST resolves the same per-resource threshold the lookup path serves."""
+    monkeypatch.delenv("SCRY_RECON_THRESHOLD", raising=False)
+    path = _keeper_with_per_resource(serving_keeper_path, tmp_path, {"node-a": 0.007})
+    frame = _scoreable_frame(Predictor(path), "node-a")
+    client = _make_client(path)
+
+    post_data = client.post("/anomaly/reconstruction", json=_body("node-a")).json()
+    with patch("scry.api.main._resource_metrics", new=AsyncMock(return_value=frame)):
+        lookup_resp = client.get("/anomaly/reconstruction/lookup?resource_id=node-a")
+
+    assert lookup_resp.status_code == 200
+    lookup_data = lookup_resp.json()
+    assert post_data["threshold"] == pytest.approx(0.007)
+    assert lookup_data["threshold"] == pytest.approx(0.007)
+    assert post_data["threshold"] == pytest.approx(lookup_data["threshold"])
+
+
+def test_post_unknown_resource_uses_global(
+    serving_keeper_path: str, tmp_path: Path, monkeypatch
+) -> None:
+    """POST with a resource_id absent from the map serves the global threshold."""
+    monkeypatch.delenv("SCRY_RECON_THRESHOLD", raising=False)
+    path = _keeper_with_per_resource(serving_keeper_path, tmp_path, {"node-a": 0.007})
+    global_threshold = Predictor(path).recon_threshold
+    client = _make_client(path)
+    data = client.post("/anomaly/reconstruction", json=_body("node-z")).json()
+    assert data["threshold"] == pytest.approx(global_threshold)
+    assert data["threshold"] != pytest.approx(0.007)
+
+
+def test_post_and_lookup_env_override_beats_map(
+    serving_keeper_path: str, tmp_path: Path, monkeypatch
+) -> None:
+    """SCRY_RECON_THRESHOLD wins over the per-resource map on both endpoints."""
+    monkeypatch.setenv("SCRY_RECON_THRESHOLD", "0.5")
+    path = _keeper_with_per_resource(serving_keeper_path, tmp_path, {"node-a": 0.007})
+    frame = _scoreable_frame(Predictor(path), "node-a")
+    client = _make_client(path)
+
+    post_data = client.post("/anomaly/reconstruction", json=_body("node-a")).json()
+    with patch("scry.api.main._resource_metrics", new=AsyncMock(return_value=frame)):
+        lookup_data = client.get("/anomaly/reconstruction/lookup?resource_id=node-a").json()
+
+    assert post_data["threshold"] == pytest.approx(0.5)
+    assert lookup_data["threshold"] == pytest.approx(0.5)
+
+
+def test_post_request_and_response_schemas_unchanged(
+    serving_keeper_path: str, monkeypatch
+) -> None:
+    """resource_id stays required with min_length 1; the response key set is unchanged."""
+    monkeypatch.delenv("SCRY_RECON_THRESHOLD", raising=False)
+    client = _make_client(serving_keeper_path)
+
+    body = _body()
+    del body["resource_id"]
+    assert client.post("/anomaly/reconstruction", json=body).status_code == 422
+    assert client.post("/anomaly/reconstruction", json=_body("")).status_code == 422
+
+    data = client.post("/anomaly/reconstruction", json=_body()).json()
+    assert set(data) == set(_KEYS)
