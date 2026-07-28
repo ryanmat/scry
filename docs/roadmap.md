@@ -48,6 +48,18 @@ with fleet size.
 ## Planned
 
 - Per-resource serving thresholds (margin over own healthy quantile, global fallback).
+- Evaluation harness with rubrics. Promote incident validation into a declarative
+  evaluation suite: a candidate is a scorer (model checkpoint plus threshold policy), and
+  a versioned rubric encodes the pass criteria that are informal today, onset-anchored
+  detection lead, no pre-onset bridging, lead-in and sustained false-positive rates,
+  clean negative controls, and coverage integrity. Candidates score against the suite of
+  labeled captures and healthy references, and promotion to serving is a rubric pass
+  rather than a judgment call. The scoring backbone stays pluggable; adopting any
+  alternative backbone is a harness verdict, not a roadmap commitment.
+- Multi-fleet training and serving for a single resource type: fleet-unique
+  resource_ids, capacity-relative feature variants in the profiles, per-resource
+  thresholds on by default, and labeled captures from more than one fleet in the
+  evaluation suite.
 - Profile reconciliation to live source metric names.
 - GPU/cloud training for production models, including a cluster-count sweep and longer history.
 - An MCP server exposing prediction and forecasting as agent tools (the reserved `mcp` extra).
