@@ -130,6 +130,8 @@ class DetailedHealthResponse(BaseModel):
         forecast_anomaly_configured: Whether an operator has attached a
             forecast-anomaly detector.
         accuracy_configured: Whether an operator has attached an accuracy tracker.
+        recon_per_resource_count: Number of baked per-resource reconstruction
+            thresholds; 0 when the serving block carries no per-resource map.
         uptime_seconds: Seconds since the API started.
     """
 
@@ -152,6 +154,9 @@ class DetailedHealthResponse(BaseModel):
     )
     accuracy_configured: bool = Field(
         False, description="Accuracy tracker attached; /accuracy serves 503 until then"
+    )
+    recon_per_resource_count: int = Field(
+        0, ge=0, description="Number of baked per-resource reconstruction thresholds (0 when none)"
     )
     uptime_seconds: float = Field(..., description="Seconds since API start")
 

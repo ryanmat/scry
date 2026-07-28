@@ -155,3 +155,52 @@ class TestHealthDetailed:
         """Model path matches the configured path."""
         data = test_client.get("/health/detailed").json()
         assert data["model_path"] == str(temp_model_path)
+
+
+class TestReconPerResourceCount:
+    """recon_per_resource_count reports the baked per-resource map size."""
+
+    @staticmethod
+    def _with_map(serving_keeper_path: str, tmp_path: Path, per_resource: dict) -> str:
+        ckpt = torch.load(serving_keeper_path, map_location="cpu", weights_only=False)
+        ckpt["serving"] = dict(ckpt["serving"], per_resource=per_resource, margin_multiplier=2.0)
+        out = str(tmp_path / "health_per_resource_keeper.pt")
+        torch.save(ckpt, out)
+        return out
+
+    def _client(self, model_path: str) -> TestClient:
+        from scry.api.main import create_app
+
+        return TestClient(create_app(model_path=model_path))
+
+    def test_zero_without_per_resource_map(self, serving_keeper_path):
+        """A serving checkpoint with no per-resource map reports a count of 0."""
+        data = self._client(serving_keeper_path).get("/health/detailed").json()
+        assert data["recon_per_resource_count"] == 0
+
+    def test_counts_map_entries(self, serving_keeper_path, tmp_path):
+        """A checkpoint with one per-resource entry reports a count of 1."""
+        path = self._with_map(serving_keeper_path, tmp_path, {"node-a": 0.007})
+        data = self._client(path).get("/health/detailed").json()
+        assert data["recon_per_resource_count"] == 1
+
+    def test_existing_fields_unchanged(self, serving_keeper_path):
+        """The new field is additive; every pre-existing field is still present."""
+        data = self._client(serving_keeper_path).get("/health/detailed").json()
+        for field in (
+            "status",
+            "model_loaded",
+            "version",
+            "model_load_time_ms",
+            "model_version",
+            "model_path",
+            "datasource",
+            "chronos_loaded",
+            "recon_threshold",
+            "drift_configured",
+            "forecast_anomaly_configured",
+            "accuracy_configured",
+            "uptime_seconds",
+            "recon_per_resource_count",
+        ):
+            assert field in data, f"Missing field: {field}"
