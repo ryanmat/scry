@@ -188,3 +188,76 @@ class TestScoringGrid:
         ids = np.array(["node-a", "node-a"])
         grid = ScoringGrid(label="serving-10min", step_samples=1, cadence=pd.Timedelta(minutes=10))
         assert grid.select_indices(ends, ids).tolist() == [0]
+
+
+class TestPerResourceTimeSplit:
+    # Windows are seq_len=30 one-minute samples emitted every 5 minutes, so two
+    # windows of one resource share raw samples iff their ends differ by less
+    # than 30 minutes. Error values encode (resource, end-minutes) so the split
+    # halves can be decoded back to windows.
+    _SEQ_MINUTES = 30
+    _STEP_MINUTES = 5
+    _GAP = -(-30 // 5)  # ceil(seq_len / step) with seq_len=30, step=5
+
+    def test_gap_expression_matches_ceil(self) -> None:
+        assert -(-30 // 10) == 3
+        assert -(-30 // 5) == 6
+        assert self._GAP == 6
+
+    def _interleaved_fixture(self) -> tuple[np.ndarray, pd.DatetimeIndex, np.ndarray]:
+        base = pd.Timestamp("2026-01-01T00:00:00Z")
+        minutes = [m for step in range(24) for m in (step * 5, step * 5)]
+        ends = pd.DatetimeIndex([base + pd.Timedelta(minutes=m) for m in minutes])
+        ids = np.array(["node-a", "node-b"] * 24)
+        codes = {"node-a": 10_000.0, "node-b": 20_000.0}
+        errors = np.array([codes[rid] + m for rid, m in zip(ids, minutes)])
+        return errors, ends, ids
+
+    def _decode(self, values: np.ndarray, resource: str) -> set[float]:
+        lo = 10_000.0 if resource == "node-a" else 20_000.0
+        return {v - lo for v in values if lo <= v < lo + 10_000.0}
+
+    def test_single_resource_bit_identity(self) -> None:
+        from scry.eval.scoring import per_resource_time_split
+        from scry.model.reconstruction import time_split
+
+        rng = np.random.default_rng(71)
+        errors = rng.uniform(0.01, 0.5, 40)
+        ends = pd.date_range("2026-01-01T00:00:00Z", periods=40, freq="5min")
+        shuffle = rng.permutation(40)
+
+        fit_ref, eval_ref = time_split(errors[shuffle], ends[shuffle], gap=self._GAP)
+        fit, eval_ = per_resource_time_split(
+            errors[shuffle], ends[shuffle], np.array(["solo"] * 40), gap=self._GAP
+        )
+        assert np.array_equal(fit, fit_ref)
+        assert np.array_equal(eval_, eval_ref)
+        assert fit.dtype == fit_ref.dtype
+        assert eval_.dtype == eval_ref.dtype
+
+    def test_pooled_split_leaks_and_per_resource_does_not(self) -> None:
+        # The defect and the fix in one test: the pooled gap spans only
+        # ~gap/n_resources distinct time steps, so pooled fit and eval windows
+        # of one resource still share raw samples; the per-resource split
+        # separates every resource's halves by more than a window length.
+        from scry.eval.scoring import per_resource_time_split
+        from scry.model.reconstruction import time_split
+
+        errors, ends, ids = self._interleaved_fixture()
+
+        pooled_fit, pooled_eval = time_split(errors, ends, gap=self._GAP)
+        pooled_leaks = False
+        for resource in ("node-a", "node-b"):
+            fit_ends = self._decode(pooled_fit, resource)
+            eval_ends = self._decode(pooled_eval, resource)
+            if fit_ends and eval_ends:
+                pooled_leaks |= min(eval_ends) - max(fit_ends) < self._SEQ_MINUTES
+        assert pooled_leaks
+
+        fit, eval_ = per_resource_time_split(errors, ends, ids, gap=self._GAP)
+        for resource in ("node-a", "node-b"):
+            fit_ends = self._decode(fit, resource)
+            eval_ends = self._decode(eval_, resource)
+            assert len(fit_ends) == 12
+            assert len(eval_ends) == 6
+            assert min(eval_ends) - max(fit_ends) >= self._SEQ_MINUTES

@@ -22,6 +22,7 @@ import pandas as pd
 
 from scry.data.windowing import WindowSet, build_windows
 from scry.model.checkpoint import Keeper
+from scry.model.reconstruction import time_split
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,46 @@ class ScoringGrid:
 # Serving-grid emulation: step-1 windows subsampled at the 10-minute wall-clock
 # cadence the deployed latest-window refresh advances on.
 SERVING_GRID = ScoringGrid(label="serving-10min", step_samples=1, cadence=pd.Timedelta(minutes=10))
+
+
+def per_resource_time_split(
+    errors: np.ndarray,
+    end_times: pd.DatetimeIndex,
+    resource_ids: np.ndarray,
+    gap: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Split each resource independently through ``time_split``, then pool the halves.
+
+    The pooled ``time_split`` drops a flat window count between its halves; in
+    a multi-resource capture that gap spans only ~gap/n_resources distinct time
+    steps, so one resource's fit and eval windows can still share raw samples.
+    Splitting per resource keeps the holdout guarantee true for every resource.
+    A single-resource input produces bit-identical output to ``time_split``.
+
+    Args:
+        errors: Per-window errors.
+        end_times: Matching per-window end timestamps.
+        resource_ids: Per-window resource ids, aligned with ``errors``.
+        gap: Windows dropped between each resource's halves; callers pass
+            ``ceil(seq_len / step)``.
+
+    Returns:
+        Tuple of (pooled fit halves, pooled eval halves), resources in sorted
+        id order.
+    """
+    errors = np.asarray(errors)
+    resource_ids = np.asarray(resource_ids)
+    fit_halves: list[np.ndarray] = []
+    eval_halves: list[np.ndarray] = []
+    for rid in sorted(set(resource_ids)):
+        mask = resource_ids == rid
+        fit, eval_ = time_split(errors[mask], end_times[mask], gap=gap)
+        fit_halves.append(fit)
+        eval_halves.append(eval_)
+    if not fit_halves:
+        empty = np.zeros(0, dtype=errors.dtype)
+        return empty, empty
+    return np.concatenate(fit_halves), np.concatenate(eval_halves)
 
 
 def windows_for_keeper(df_long: pd.DataFrame, keeper: Keeper, seq_len: int, step: int) -> WindowSet:

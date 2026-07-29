@@ -39,6 +39,7 @@ from scry.eval.labels import (
 _LAZY_EXPORTS: dict[str, str] = {
     "SERVING_GRID": "scry.eval.scoring",
     "ScoringGrid": "scry.eval.scoring",
+    "per_resource_time_split": "scry.eval.scoring",
     "windows_for_keeper": "scry.eval.scoring",
 }
 
@@ -76,6 +77,7 @@ __all__ = [
     "from_v1",
     "load_labels",
     "per_resource_eligibility",
+    "per_resource_time_split",
     "select_detection",
     "slice_stats",
     "windows_for_keeper",
