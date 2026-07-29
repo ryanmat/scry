@@ -17,6 +17,15 @@ from scry.eval.detection import (
     select_detection,
     slice_stats,
 )
+from scry.eval.labels import (
+    ONSET_NAMES,
+    ROLES,
+    LabelCase,
+    LabelSet,
+    dump_labels,
+    from_v1,
+    load_labels,
+)
 
 # name -> source module, resolved on first access by __getattr__ below.
 _LAZY_EXPORTS: dict[str, str] = {}
@@ -36,10 +45,17 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    "ONSET_NAMES",
+    "ROLES",
     "SUSTAIN_DEFAULT",
     "DetectionMode",
     "DetectionResult",
+    "LabelCase",
+    "LabelSet",
     "anomaly_runs",
+    "dump_labels",
+    "from_v1",
+    "load_labels",
     "select_detection",
     "slice_stats",
 ]
