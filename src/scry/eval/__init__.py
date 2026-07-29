@@ -3,7 +3,7 @@
 
 """Evaluation harness for Scry.
 
-Torch-free members (the detection primitives) import eagerly. Torch-dependent
+Torch-free members (detection, labels, hygiene) import eagerly. Torch-dependent
 members import lazily via PEP 562 ``__getattr__`` so torch-free consumers can
 use this package without pulling torch. Every name in ``__all__`` still
 resolves.
@@ -16,6 +16,14 @@ from scry.eval.detection import (
     anomaly_runs,
     select_detection,
     slice_stats,
+)
+from scry.eval.hygiene import (
+    MIN_PER_RESOURCE_WINDOWS,
+    REASON_DIVERGENT,
+    REASON_NONPOSITIVE_QUANTILE,
+    REASON_TOO_FEW_WINDOWS,
+    ResourceEligibility,
+    per_resource_eligibility,
 )
 from scry.eval.labels import (
     ONSET_NAMES,
@@ -45,17 +53,23 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    "MIN_PER_RESOURCE_WINDOWS",
     "ONSET_NAMES",
+    "REASON_DIVERGENT",
+    "REASON_NONPOSITIVE_QUANTILE",
+    "REASON_TOO_FEW_WINDOWS",
     "ROLES",
     "SUSTAIN_DEFAULT",
     "DetectionMode",
     "DetectionResult",
     "LabelCase",
     "LabelSet",
+    "ResourceEligibility",
     "anomaly_runs",
     "dump_labels",
     "from_v1",
     "load_labels",
+    "per_resource_eligibility",
     "select_detection",
     "slice_stats",
 ]
