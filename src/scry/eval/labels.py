@@ -1,5 +1,5 @@
 # Description: Versioned incident labels: named onsets and per-resource roles for the eval harness.
-# Description: Torch-free; validation runs on construction and enumerates the valid alternatives.
+# Description: Torch-free; loads v1 or v2 JSON, always dumps v2, and validates on construction.
 
 """Incident label model with named onsets and per-resource roles.
 
@@ -7,12 +7,17 @@ A ``LabelCase`` assigns one resource a role (incident, negative_control, or
 excluded) and, for incidents, named onsets drawn from ``ONSET_NAMES`` plus a
 required ``end``. Validation runs in ``__post_init__`` so every construction
 path enforces the same rules; error messages enumerate the valid alternatives.
-Timestamps normalize to UTC; naive timestamps are rejected. Everything here is
-importable without torch.
+Timestamps normalize to UTC; naive timestamps are rejected.
+
+``load_labels`` reads either schema version, dispatching on the top-level JSON
+type: a list is the v1 single-onset incident format, an object with
+``"version": 2`` is the versioned multi-onset format. ``dump_labels`` always
+writes v2. Everything here is importable without torch.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 import pandas as pd
@@ -92,3 +97,84 @@ class LabelSet:
             if case.resource_id == resource_id:
                 return case.role
         return "excluded"
+
+
+def from_v1(entries: list[dict]) -> LabelSet:
+    """Map v1 entries ({resource_id, type, start, end}) to a version-1 LabelSet.
+
+    Every v1 entry is an incident: ``start`` becomes onset T0 and the primary
+    onset, ``end`` stays ``end``. The set keeps ``version=1`` to record its
+    source format; ``dump_labels`` writes v2 regardless.
+    """
+    cases = [
+        LabelCase(
+            resource_id=entry["resource_id"],
+            role="incident",
+            type=entry.get("type"),
+            onsets={"T0": entry["start"]},
+            primary_onset="T0",
+            end=entry["end"],
+            notes=None,
+        )
+        for entry in entries
+    ]
+    return LabelSet(version=1, capture=None, cases=cases)
+
+
+def load_labels(path: str) -> LabelSet:
+    """Load a labels file, dispatching on the top-level type (v1 list or v2 object)."""
+    with open(path) as handle:
+        raw = json.load(handle)
+    if isinstance(raw, list):
+        return from_v1(raw)
+    if isinstance(raw, dict):
+        version = raw.get("version")
+        if version != 2:
+            raise ValueError(
+                f"unsupported labels version {version!r} in {path}; "
+                "supported: a JSON list (v1) or an object with version 2"
+            )
+        cases = [
+            LabelCase(
+                resource_id=entry["resource_id"],
+                role=entry["role"],
+                type=entry.get("type"),
+                onsets=dict(entry.get("onsets") or {}),
+                primary_onset=entry.get("primary_onset"),
+                end=entry.get("end"),
+                notes=entry.get("notes"),
+            )
+            for entry in raw.get("cases", [])
+        ]
+        return LabelSet(version=2, capture=raw.get("capture"), cases=cases)
+    raise ValueError(
+        f"labels file {path} must be a JSON list (v1) or an object with version 2; "
+        f"got {type(raw).__name__}"
+    )
+
+
+def _iso_z(ts: pd.Timestamp) -> str:
+    """ISO-8601 UTC with a Z suffix, the v2 on-disk timestamp form."""
+    return ts.isoformat().replace("+00:00", "Z")
+
+
+def dump_labels(labels: LabelSet, path: str) -> None:
+    """Write ``labels`` as v2 JSON regardless of the source format."""
+    payload = {
+        "version": 2,
+        "capture": labels.capture,
+        "cases": [
+            {
+                "resource_id": case.resource_id,
+                "role": case.role,
+                "type": case.type,
+                "onsets": {name: _iso_z(value) for name, value in case.onsets.items()},
+                "primary_onset": case.primary_onset,
+                "end": _iso_z(case.end) if case.end is not None else None,
+                "notes": case.notes,
+            }
+            for case in labels.cases
+        ],
+    }
+    with open(path, "w") as handle:
+        json.dump(payload, handle, indent=2)
