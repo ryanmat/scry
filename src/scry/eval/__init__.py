@@ -36,7 +36,9 @@ from scry.eval.labels import (
 )
 
 # name -> source module, resolved on first access by __getattr__ below.
-_LAZY_EXPORTS: dict[str, str] = {}
+_LAZY_EXPORTS: dict[str, str] = {
+    "windows_for_keeper": "scry.eval.scoring",
+}
 
 
 def __getattr__(name: str):
@@ -72,4 +74,5 @@ __all__ = [
     "per_resource_eligibility",
     "select_detection",
     "slice_stats",
+    "windows_for_keeper",
 ]

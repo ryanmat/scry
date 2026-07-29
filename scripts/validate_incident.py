@@ -44,8 +44,8 @@ import pandas as pd
 from scry.data.feature_engineering import set_active_profile
 from scry.data.fetcher import fetch_full_capture
 from scry.data.quality import missing_features
-from scry.data.windowing import WindowSet, build_windows
 from scry.eval.detection import anomaly_runs
+from scry.eval.scoring import windows_for_keeper
 from scry.model.checkpoint import Keeper, load_keeper
 from scry.model.reconstruction import reconstruction_errors, time_split
 from scry.utils.config import get_config
@@ -269,19 +269,7 @@ def compute_threshold(
     return threshold, source, fit, eval_
 
 
-def _windows_for_keeper(
-    df_long: pd.DataFrame, keeper: Keeper, seq_len: int, step: int
-) -> WindowSet:
-    """Window a capture for a loaded keeper, passing its schema and stored normalization."""
-    return build_windows(
-        df_long,
-        numerical_features=keeper.numerical_features,
-        categorical_features=keeper.categorical_features,
-        normalization=keeper.normalization,
-        cat_normalization=keeper.cat_normalization,
-        seq_len=seq_len,
-        step=step,
-    )
+_windows_for_keeper = windows_for_keeper
 
 
 def _warn_missing_model_features(df_long: pd.DataFrame, keeper: Keeper, source: str) -> None:
