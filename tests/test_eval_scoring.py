@@ -16,6 +16,7 @@ and single-keep dedup when one window is the greatest for several ticks.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -261,3 +262,82 @@ class TestPerResourceTimeSplit:
             assert len(fit_ends) == 12
             assert len(eval_ends) == 6
             assert min(eval_ends) - max(fit_ends) >= self._SEQ_MINUTES
+
+
+class TestReconstructionCandidate:
+    def test_score_returns_scoreset_with_provenance_meta(
+        self, keeper_path: str, fleet_df: pd.DataFrame
+    ) -> None:
+        from scry.eval.candidate import ReconstructionCandidate, ScoreSet
+        from scry.eval.scoring import ScoringGrid
+
+        grid = ScoringGrid(label="offline-20min", step_samples=10)
+        score_set = ReconstructionCandidate(keeper_path, profile=PROFILE).score(fleet_df, grid)
+
+        assert isinstance(score_set, ScoreSet)
+        assert score_set.errors.dtype == np.float64
+        assert score_set.errors.ndim == 1
+        n = score_set.errors.shape[0]
+        assert len(score_set.end_times) == n
+        assert score_set.resource_ids.shape[0] == n
+        assert n == 2 * ((200 - SEQ_LEN) // 10 + 1)
+        assert score_set.grid is grid
+
+        expected_sha = hashlib.sha256(Path(keeper_path).read_bytes()).hexdigest()
+        keeper = load_keeper(keeper_path)
+        assert score_set.meta["model_path"] == keeper_path
+        assert score_set.meta["model_sha256"] == expected_sha
+        assert score_set.meta["profile"] == PROFILE
+        assert score_set.meta["seq_len"] == int(keeper.config["seq_len"])
+        assert score_set.meta["step"] == 10
+        assert score_set.meta["device"] == keeper.device
+
+    def test_missing_model_path_raises_file_not_found(self) -> None:
+        from scry.eval.candidate import ReconstructionCandidate
+        from scry.eval.scoring import ScoringGrid
+
+        candidate = ReconstructionCandidate("models/does_not_exist.pt", profile=PROFILE)
+        with pytest.raises(FileNotFoundError):
+            candidate.score(pd.DataFrame(), ScoringGrid(label="native", step_samples=1))
+
+    def test_grid_changes_over_threshold_counts(self, keeper_path: str, tmp_path: Path) -> None:
+        # The 2-vs-3 finding in miniature: one excursion, two grids, different
+        # over-threshold window counts, each keyed by its grid label. The spike
+        # spans 55 samples so the over-window end interval [600, 683] holds 8
+        # offline windows (ends on 9 mod 10) vs 9 serving-lattice windows (ends
+        # on 0 mod 10); the q99 threshold additionally leaves one healthy
+        # quantile-tail window over per grid, so the counts differ by one
+        # structurally either way.
+        from scry.eval.candidate import ReconstructionCandidate
+        from scry.eval.scoring import SERVING_GRID, ScoringGrid
+
+        df, _ = gen_capture("node-a", 700, seed=81, spike=(600, 655, 40.0))
+        csv = write_csv(df, tmp_path / "excursion.csv")
+        df_long = asyncio.run(fetch_full_capture(csv, profile=PROFILE))
+
+        candidate = ReconstructionCandidate(keeper_path, profile=PROFILE)
+        offline = ScoringGrid(label="offline-20min", step_samples=10)
+
+        counts: dict[str, int] = {}
+        thresholds: dict[str, float] = {}
+        for grid in (offline, SERVING_GRID):
+            score_set = candidate.score(df_long, grid)
+            spike_start = df_long["timestamp"].min() + pd.Timedelta(minutes=600)
+            healthy = score_set.errors[score_set.end_times < spike_start]
+            thresholds[grid.label] = float(np.quantile(healthy, 0.99))
+            counts[grid.label] = int((score_set.errors > thresholds[grid.label]).sum())
+
+        assert set(counts) == {"offline-20min", "serving-10min"}
+        assert counts["offline-20min"] != counts["serving-10min"]
+
+    def test_empty_input_scores_to_empty_arrays(self, keeper_path: str) -> None:
+        from scry.eval.candidate import ReconstructionCandidate
+        from scry.eval.scoring import ScoringGrid
+
+        empty = pd.DataFrame(columns=["resource_id", "metric_name", "timestamp", "value"])
+        score_set = ReconstructionCandidate(keeper_path, profile=PROFILE).score(
+            empty, ScoringGrid(label="native", step_samples=1)
+        )
+        assert score_set.errors.shape == (0,)
+        assert len(score_set.end_times) == 0
+        assert score_set.resource_ids.shape == (0,)
