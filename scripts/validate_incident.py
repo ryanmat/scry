@@ -15,10 +15,12 @@ measured on a healthy set held out from the threshold fit (when the model also
 trained on that capture, the FPR remains in-sample for the model; an incident
 capture the model never saw gives a fully out-of-sample result). An explicit
 threshold override skips this derivation entirely and measures the false-positive
-rate directly on the pre-onset windows. For each
-labeled incident the harness reports
-the sustained anomaly that leads into onset within a bounded look-back horizon and
-its lead time, where a positive value means the alarm began before onset.
+rate directly on the pre-onset windows. For each labeled incident the harness
+reports the detection verdict under the selected mode: the default lookback mode
+credits the sustained anomaly that leads into onset within a bounded look-back
+horizon (a positive lead time means the alarm began before onset), while
+no_bridging credits only runs starting at or after onset and reports a
+pre-onset run that bridges onset as no detection.
 
 Examples:
     python scripts/validate_incident.py \\
@@ -43,10 +45,9 @@ import pandas as pd
 
 from scry.data.feature_engineering import set_active_profile
 from scry.data.fetcher import fetch_full_capture
-from scry.data.quality import missing_features
-from scry.eval.detection import anomaly_runs
-from scry.eval.scoring import windows_for_keeper
-from scry.model.checkpoint import Keeper, load_keeper
+from scry.eval.detection import DetectionMode, anomaly_runs, select_detection
+from scry.eval.scoring import warn_missing_model_features, windows_for_keeper
+from scry.model.checkpoint import load_keeper
 from scry.model.reconstruction import reconstruction_errors, time_split
 from scry.utils.config import get_config
 
@@ -99,40 +100,6 @@ def load_incidents(labels_path: str) -> list[Incident]:
 _anomaly_runs = anomaly_runs
 
 
-def _select_detection(
-    spans: list[tuple[pd.Timestamp, pd.Timestamp]],
-    scan_ts: pd.DatetimeIndex,
-    onset: pd.Timestamp,
-) -> pd.Timestamp | None:
-    """Pick the detection time for the alarm that leads into onset, if any.
-
-    A sustained run counts as leading into onset only when it is still active at
-    onset: it starts at or before onset and its last window ends within one
-    inter-window step of onset, so a run that recovers before onset is not
-    credited. Such a run is traced back to its start. If no run reaches onset but
-    one extends into or past it, that is a late detection. A run that both starts
-    and ends before onset (a recovered blip) is ignored.
-
-    Args:
-        spans: Sustained anomalous runs as (start_time, end_time), time-ordered.
-        scan_ts: The scanned window end-times (for the inter-window step).
-        onset: The incident onset.
-
-    Returns:
-        The detection start-time, or None when no run leads into or follows onset.
-    """
-    if not spans:
-        return None
-    step = pd.Timedelta(np.median(np.diff(scan_ts.values))) if len(scan_ts) > 1 else pd.Timedelta(0)
-    leading = [span for span in spans if span[0] <= onset and span[1] >= onset - step]
-    if leading:
-        return min(leading, key=lambda span: span[0])[0]
-    after = [span for span in spans if span[1] >= onset]
-    if after:
-        return min(after, key=lambda span: span[0])[0]
-    return None
-
-
 def evaluate_incidents(
     errors: np.ndarray,
     resource_ids: np.ndarray,
@@ -141,18 +108,19 @@ def evaluate_incidents(
     threshold: float,
     sustain: int,
     max_leadtime: pd.Timedelta,
+    mode: DetectionMode = "lookback",
 ) -> list[dict[str, Any]]:
     """Detect each incident and compute the lead time of the alarm that leads into it.
 
     For each incident, only that resource's windows in the look-back horizon
-    ``[onset - max_leadtime, incident.end]`` are scanned. Detection is the
-    sustained anomalous run (>= ``sustain`` consecutive windows over
-    ``threshold``) that is still active at onset -- it starts at or before onset
-    and ends within one inter-window step of it -- traced back to its start; lead
-    time is then the incident start minus that start (positive means the alarm
-    began before onset). A run that recovers before onset is a causally-unrelated
-    blip and is not credited. If no run reaches onset but one extends into or past
-    it, that is a late detection (non-positive lead time). See ``_select_detection``.
+    ``[onset - max_leadtime, incident.end]`` are scanned. Sustained anomalous
+    runs (>= ``sustain`` consecutive windows over ``threshold``) go through
+    ``scry.eval.detection.select_detection`` under ``mode``: lookback credits a
+    run still active at onset from its start (positive lead means the alarm
+    began before onset; a run that recovers before onset is a
+    causally-unrelated blip and is not credited; a run reaching onset late is a
+    non-positive lead), while no_bridging only credits runs starting at or
+    after onset and reports a pre-onset run that bridges onset as no detection.
 
     Args:
         errors: Per-window reconstruction errors.
@@ -162,6 +130,7 @@ def evaluate_incidents(
         threshold: Anomaly threshold.
         sustain: Sustained-anomaly run length.
         max_leadtime: Look-back horizon before onset to consider for detection.
+        mode: Detection-selection semantics.
 
     Returns:
         One result dict per incident.
@@ -190,11 +159,11 @@ def evaluate_incidents(
             scan_ts = scan_ts[order]
             flags = errors[scan_mask][order] > threshold
             spans = [(scan_ts[s], scan_ts[e]) for s, e in _anomaly_runs(flags, sustain)]
-            detection_time = _select_detection(spans, scan_ts, incident.start)
-            if detection_time is not None:
+            detection = select_detection(spans, scan_ts, incident.start, mode)
+            if detection.detected:
                 result["detected"] = True
-                result["first_detection_time"] = detection_time.isoformat()
-                result["lead_time_seconds"] = (incident.start - detection_time).total_seconds()
+                result["first_detection_time"] = detection.detection_time.isoformat()
+                result["lead_time_seconds"] = detection.lead_seconds
 
         in_window = resource_mask & (end_times >= incident.start) & (end_times <= incident.end)
         if in_window.any():
@@ -270,24 +239,7 @@ def compute_threshold(
 
 
 _windows_for_keeper = windows_for_keeper
-
-
-def _warn_missing_model_features(df_long: pd.DataFrame, keeper: Keeper, source: str) -> None:
-    """Warn when a capture lacks features the checkpoint trained on.
-
-    The profile filter strips metrics the live profile no longer lists, and
-    windowing fills absent features with neutral values, so a checkpoint from
-    an older profile definition scores silently differently. A name-only
-    profile comparison cannot catch this.
-    """
-    missing = missing_features(df_long, keeper.numerical_features)
-    if missing:
-        print(
-            f"warning: {source} lacks {len(missing)} feature(s) the checkpoint was "
-            f"trained on ({', '.join(missing)}); they window as neutral values, so "
-            "scores are not comparable to the checkpoint's calibration.",
-            file=sys.stderr,
-        )
+_warn_missing_model_features = warn_missing_model_features
 
 
 def analyze(
@@ -302,6 +254,9 @@ def analyze(
     reference: str | None = None,
     threshold: float | None = None,
     data_format: str | None = None,
+    detection_mode: DetectionMode = "lookback",
+    window_step: int | None = None,
+    plot: str | None = None,
 ) -> dict[str, Any]:
     """Run the full incident-validation analysis and return the summary.
 
@@ -318,6 +273,11 @@ def analyze(
             and any reference are skipped and the FPR is measured on the pre-onset
             windows. Takes precedence over ``reference``.
         data_format: Optional explicit file format override.
+        detection_mode: Detection-selection semantics (lookback or no_bridging).
+        window_step: Sliding-window step in samples; defaults to the config
+            ``window_step``. The effective value is reported in the summary.
+        plot: Optional path for the timeline figure, drawn from the same
+            windows and errors the summary is computed on.
 
     Returns:
         The summary dict (also suitable for JSON serialization).
@@ -334,7 +294,7 @@ def analyze(
 
     set_active_profile(profile)
     seq_len = int(keeper.config["seq_len"])
-    step = int(get_config().window_step)
+    step = int(window_step) if window_step is not None else int(get_config().window_step)
 
     df_long = asyncio.run(fetch_full_capture(data, profile=profile, data_format=data_format))
     _warn_missing_model_features(df_long, keeper, data)
@@ -393,7 +353,11 @@ def analyze(
         resolved_threshold,
         sustain,
         pd.Timedelta(seconds=max_leadtime_seconds),
+        mode=detection_mode,
     )
+
+    if plot:
+        write_plot(plot, errors, windows.end_times, resolved_threshold, incidents)
 
     return {
         "threshold": resolved_threshold,
@@ -401,6 +365,7 @@ def analyze(
         "threshold_quantile": summary_quantile,
         "sustain": sustain,
         "max_leadtime_seconds": max_leadtime_seconds,
+        "window_step": step,
         "n_windows": int(errors.size),
         "n_threshold_windows": int(fit_errors.size),
         "n_eval_windows": int(eval_errors.size),
@@ -503,6 +468,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Explicit anomaly threshold; skips the healthy-window fit and any reference.",
     )
     parser.add_argument(
+        "--detection-mode",
+        choices=["lookback", "no_bridging"],
+        default="lookback",
+        help="Detection-selection semantics (default: lookback).",
+    )
+    parser.add_argument(
+        "--window-step",
+        type=int,
+        default=None,
+        help="Sliding-window step in samples (default: the config window_step).",
+    )
+    parser.add_argument(
         "--format", choices=["parquet", "csv"], default=None, help="Override the file format."
     )
     parser.add_argument("--plot", default=None, help="Optional path to write a timeline figure.")
@@ -528,6 +505,9 @@ def main(argv: list[str] | None = None) -> int:
         reference=args.reference,
         threshold=args.threshold,
         data_format=args.format,
+        detection_mode=args.detection_mode,
+        window_step=args.window_step,
+        plot=args.plot,
     )
 
     payload = json.dumps(summary, indent=2)
@@ -535,19 +515,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         Path(args.output).write_text(payload)
-
-    if args.plot:
-        keeper = load_keeper(args.model)
-        set_active_profile(args.profile)
-        seq_len = int(keeper.config["seq_len"])
-        step = int(get_config().window_step)
-        df_long = asyncio.run(
-            fetch_full_capture(args.data, profile=args.profile, data_format=args.format)
-        )
-        windows = _windows_for_keeper(df_long, keeper, seq_len, step)
-        errors = reconstruction_errors(keeper.model, windows.x_num, windows.x_cat, keeper.device)
-        incidents = load_incidents(args.labels)
-        write_plot(args.plot, errors, windows.end_times, summary["threshold"], incidents)
 
     return 0
 

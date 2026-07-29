@@ -40,6 +40,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "SERVING_GRID": "scry.eval.scoring",
     "ScoringGrid": "scry.eval.scoring",
     "per_resource_time_split": "scry.eval.scoring",
+    "warn_missing_model_features": "scry.eval.scoring",
     "windows_for_keeper": "scry.eval.scoring",
 }
 
@@ -80,5 +81,6 @@ __all__ = [
     "per_resource_time_split",
     "select_detection",
     "slice_stats",
+    "warn_missing_model_features",
     "windows_for_keeper",
 ]

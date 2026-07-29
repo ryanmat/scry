@@ -5,7 +5,9 @@
 
 ``windows_for_keeper`` windows a canonical long-format capture with the
 checkpoint's own feature schema and stored normalization, through the same
-``build_windows``/``WindowSet`` primitives the predictor uses. ``ScoringGrid``
+``build_windows``/``WindowSet`` primitives the predictor uses;
+``warn_missing_model_features`` flags a capture that lacks trained features
+before those windows silently score on neutral fills. ``ScoringGrid``
 makes the scoring stride and cadence explicit: the stride never comes from
 ambient config inside ``scry.eval``, and every sustain-bearing number is keyed
 by the grid label it was computed on. This module imports the model stack, so
@@ -15,11 +17,13 @@ torch-free.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 
+from scry.data.quality import missing_features
 from scry.data.windowing import WindowSet, build_windows
 from scry.model.checkpoint import Keeper
 from scry.model.reconstruction import time_split
@@ -129,3 +133,21 @@ def windows_for_keeper(df_long: pd.DataFrame, keeper: Keeper, seq_len: int, step
         seq_len=seq_len,
         step=step,
     )
+
+
+def warn_missing_model_features(df_long: pd.DataFrame, keeper: Keeper, source: str) -> None:
+    """Warn when a capture lacks features the checkpoint trained on.
+
+    The profile filter strips metrics the live profile no longer lists, and
+    windowing fills absent features with neutral values, so a checkpoint from
+    an older profile definition scores silently differently. A name-only
+    profile comparison cannot catch this.
+    """
+    missing = missing_features(df_long, keeper.numerical_features)
+    if missing:
+        print(
+            f"warning: {source} lacks {len(missing)} feature(s) the checkpoint was "
+            f"trained on ({', '.join(missing)}); they window as neutral values, so "
+            "scores are not comparable to the checkpoint's calibration.",
+            file=sys.stderr,
+        )
