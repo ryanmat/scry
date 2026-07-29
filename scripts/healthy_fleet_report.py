@@ -38,15 +38,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-try:
-    import validate_incident
-except ModuleNotFoundError:  # running from outside scripts/ without an install
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import validate_incident
-
 from scry.data.feature_engineering import set_active_profile
 from scry.data.fetcher import fetch_full_capture
+from scry.eval.detection import anomaly_runs
 from scry.eval.hygiene import per_resource_eligibility
+from scry.eval.scoring import warn_missing_model_features, windows_for_keeper
 from scry.model.checkpoint import load_keeper
 from scry.model.reconstruction import reconstruction_errors
 from scry.utils.config import get_config
@@ -94,7 +90,7 @@ def _resource_baseline(
 
     thresh_stats: dict[str, Any] = {}
     for threshold in thresholds:
-        runs = len(validate_incident._anomaly_runs(ordered > threshold, sustain))
+        runs = len(anomaly_runs(ordered > threshold, sustain))
         window_fpr = float(np.mean(errors > threshold)) if errors.size else None
         runs_per_week = (7.0 * runs / span_days) if span_days > 0 else None
         thresh_stats[_threshold_key(threshold)] = {
@@ -236,8 +232,8 @@ def analyze(
     step = int(get_config().window_step)
 
     df_long = asyncio.run(fetch_full_capture(data, profile=profile, data_format=data_format))
-    validate_incident._warn_missing_model_features(df_long, keeper, data)
-    windows = validate_incident._windows_for_keeper(df_long, keeper, seq_len, step)
+    warn_missing_model_features(df_long, keeper, data)
+    windows = windows_for_keeper(df_long, keeper, seq_len, step)
     if windows.x_num.shape[0] == 0:
         raise ValueError(
             f"Capture {data} produced no windows for profile '{profile}'. "

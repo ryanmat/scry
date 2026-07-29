@@ -36,7 +36,13 @@ from scry.eval.labels import (
 )
 
 # name -> source module, resolved on first access by __getattr__ below.
-_LAZY_EXPORTS: dict[str, str] = {}
+_LAZY_EXPORTS: dict[str, str] = {
+    "SERVING_GRID": "scry.eval.scoring",
+    "ScoringGrid": "scry.eval.scoring",
+    "per_resource_time_split": "scry.eval.scoring",
+    "warn_missing_model_features": "scry.eval.scoring",
+    "windows_for_keeper": "scry.eval.scoring",
+}
 
 
 def __getattr__(name: str):
@@ -59,17 +65,22 @@ __all__ = [
     "REASON_NONPOSITIVE_QUANTILE",
     "REASON_TOO_FEW_WINDOWS",
     "ROLES",
+    "SERVING_GRID",
     "SUSTAIN_DEFAULT",
     "DetectionMode",
     "DetectionResult",
     "LabelCase",
     "LabelSet",
     "ResourceEligibility",
+    "ScoringGrid",
     "anomaly_runs",
     "dump_labels",
     "from_v1",
     "load_labels",
     "per_resource_eligibility",
+    "per_resource_time_split",
     "select_detection",
     "slice_stats",
+    "warn_missing_model_features",
+    "windows_for_keeper",
 ]

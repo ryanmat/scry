@@ -347,3 +347,135 @@ def test_nonpositive_threshold_is_rejected(tmp_path: Path) -> None:
     for bad in ("0", "-1.5"):
         with pytest.raises(SystemExit):
             vi.parse_args(_validate_argv(tmp_path, "--threshold", bad))
+
+
+def test_detection_mode_no_bridging_flips_bridging_verdict(
+    keeper_path: str, tmp_path: Path
+) -> None:
+    """A lone run bridging onset detects under lookback but not under no_bridging."""
+    ref_df, _ = _gen_capture("ref-node", 400, seed=10)
+    ref_csv = _write_csv(ref_df, tmp_path / "reference.csv")
+    capture_df, ts = _gen_capture("node-a", 700, seed=2, ramp=(500, 700, 40.0))
+    capture_csv = _write_csv(capture_df, tmp_path / "bridging.csv")
+    labels = _write_labels(
+        tmp_path / "labels.json", [_incident("node-a", "cpu_ramp", ts[600], ts[699])]
+    )
+
+    lookback = vi.analyze(keeper_path, capture_csv, labels, _PROFILE, reference=ref_csv)
+    assert lookback["incidents"][0]["detected"] is True
+    assert lookback["incidents"][0]["lead_time_seconds"] > 0
+
+    no_bridging = vi.analyze(
+        keeper_path,
+        capture_csv,
+        labels,
+        _PROFILE,
+        reference=ref_csv,
+        detection_mode="no_bridging",
+    )
+    assert no_bridging["incidents"][0]["detected"] is False
+    assert no_bridging["incidents"][0]["first_detection_time"] is None
+
+
+def test_window_step_override_and_summary_field(keeper_path: str, tmp_path: Path) -> None:
+    """--window-step overrides the config stride; the summary reports the effective one."""
+    capture_df, ts = _gen_capture("node-a", 700, seed=2, spike=(600, 700, 40.0))
+    capture_csv = _write_csv(capture_df, tmp_path / "step.csv")
+    labels = _write_labels(
+        tmp_path / "labels.json", [_incident("node-a", "cpu_step", ts[600], ts[699])]
+    )
+
+    from synth import SEQ_LEN
+
+    default = vi.analyze(keeper_path, capture_csv, labels, _PROFILE)
+    config_step = int(vi.get_config().window_step)
+    assert default["window_step"] == config_step
+    assert default["n_windows"] == (700 - SEQ_LEN) // config_step + 1
+
+    override = vi.analyze(keeper_path, capture_csv, labels, _PROFILE, window_step=5)
+    assert override["window_step"] == 5
+    assert override["n_windows"] == (700 - SEQ_LEN) // 5 + 1
+
+
+def test_new_flags_reach_analyze_through_cli(keeper_path: str, tmp_path: Path) -> None:
+    """--detection-mode and --window-step are wired from the CLI into the summary."""
+    import json as _json
+
+    capture_df, ts = _gen_capture("node-a", 700, seed=2, spike=(600, 700, 40.0))
+    capture_csv = _write_csv(capture_df, tmp_path / "cli.csv")
+    labels = _write_labels(
+        tmp_path / "labels.json", [_incident("node-a", "cpu_step", ts[600], ts[699])]
+    )
+    out = tmp_path / "summary.json"
+    rc = vi.main(
+        [
+            "--model",
+            keeper_path,
+            "--data",
+            capture_csv,
+            "--labels",
+            labels,
+            "--profile",
+            _PROFILE,
+            "--detection-mode",
+            "no_bridging",
+            "--window-step",
+            "5",
+            "--output",
+            str(out),
+        ]
+    )
+    assert rc == 0
+    loaded = _json.loads(out.read_text())
+    assert loaded["window_step"] == 5
+
+
+def test_cli_surface_regression() -> None:
+    """Required flags, defaults, and the reference/threshold exclusivity are unchanged."""
+    with pytest.raises(SystemExit):
+        vi.parse_args([])
+    base = ["--model", "m.pt", "--data", "d.csv", "--labels", "l.json", "--profile", _PROFILE]
+    args = vi.parse_args(base)
+    assert args.threshold_quantile == 0.99
+    assert args.sustain == 3
+    assert args.max_leadtime == 7200.0
+    assert args.reference is None
+    assert args.threshold is None
+    assert args.detection_mode == "lookback"
+    assert args.window_step is None
+    with pytest.raises(SystemExit):
+        vi.parse_args([*base, "--reference", "r.csv", "--threshold", "0.2"])
+    with pytest.raises(SystemExit):
+        vi.parse_args([*base, "--threshold", "0"])
+
+
+def test_plot_consumes_analyze_arrays(keeper_path: str, tmp_path: Path) -> None:
+    """The plot is written from analyze's own scoring pass; main never rescores."""
+    import inspect
+
+    main_source = inspect.getsource(vi.main)
+    assert "windows_for_keeper" not in main_source
+    assert "reconstruction_errors" not in main_source
+
+    capture_df, ts = _gen_capture("node-a", 400, seed=2, spike=(300, 400, 40.0))
+    capture_csv = _write_csv(capture_df, tmp_path / "plot.csv")
+    labels = _write_labels(
+        tmp_path / "labels.json", [_incident("node-a", "cpu_step", ts[300], ts[399])]
+    )
+    plot_path = tmp_path / "timeline.png"
+    rc = vi.main(
+        [
+            "--model",
+            keeper_path,
+            "--data",
+            capture_csv,
+            "--labels",
+            labels,
+            "--profile",
+            _PROFILE,
+            "--plot",
+            str(plot_path),
+        ]
+    )
+    assert rc == 0
+    assert plot_path.exists()
