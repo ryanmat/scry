@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import math
 import sys
 from pathlib import Path
@@ -40,6 +41,13 @@ import torch
 from scry.data.fetcher import fetch_full_capture
 from scry.data.quality import missing_features
 from scry.data.windowing import build_windows
+from scry.eval.hygiene import (
+    MIN_PER_RESOURCE_WINDOWS,
+    REASON_DIVERGENT,
+    REASON_TOO_FEW_WINDOWS,
+    ResourceEligibility,
+    per_resource_eligibility,
+)
 from scry.model.checkpoint import Keeper, load_keeper
 from scry.model.reconstruction import healthy_threshold, reconstruction_errors
 from scry.utils.config import get_config
@@ -47,12 +55,6 @@ from scry.utils.config import get_config
 # Identifies how the score was computed, so a serving block is never misread as a
 # different metric (e.g. numerical+categorical error) at a different scale.
 RECON_METRIC = "numerical_mse_from_mu"
-
-# Floor on per-resource calibration size: a resource with fewer windows is omitted
-# from the per-resource map. This screens near-empty resources only; a small-sample
-# q99 still sits at or near the sample maximum and leans tight relative to the true
-# quantile, and the margin multiplier is what carries that headroom.
-MIN_PER_RESOURCE_WINDOWS = 50
 
 
 def compute_serving_block(
@@ -62,7 +64,7 @@ def compute_serving_block(
     quantile: float,
     step: int,
     per_resource_margin: float | None = None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, ResourceEligibility] | None]:
     """Derive the serving block from a keeper and an all-healthy capture.
 
     Args:
@@ -78,7 +80,10 @@ def compute_serving_block(
             omitted (it serves the global threshold as fallback).
 
     Returns:
-        The serving block dict.
+        Tuple of the serving block dict and the per-resource eligibility map
+        (``scry.eval.hygiene`` verdicts, so a downstream re-bake can distinguish
+        gate-omitted from absent-from-capture); the map is None when per-resource
+        baking is off.
 
     Raises:
         ValueError: If the capture produces no windows.
@@ -113,6 +118,7 @@ def compute_serving_block(
         "n_calibration_windows": int(fit.size),
         "recon_metric": RECON_METRIC,
     }
+    eligibility: dict[str, ResourceEligibility] | None = None
     if per_resource_margin is not None:
         if not math.isfinite(per_resource_margin) or per_resource_margin <= 0:
             raise ValueError("per_resource_margin must be a positive finite number")
@@ -121,47 +127,53 @@ def compute_serving_block(
         # path (which windows the resource alone) fills it neutral. A per-resource
         # quantile from such windows sits on a scale serving never produces, so the
         # affected resource is omitted and falls back to the global threshold.
-        trained = set(keeper.numerical_features)
-        capture_features = set(df_long["metric_name"].unique()) & trained
+        # The gate verdicts come from scry.eval.hygiene, the shared implementation.
         features_by_resource = {
             str(rid): set(group["metric_name"].unique())
             for rid, group in df_long.groupby("resource_id")
         }
+        eligibility = per_resource_eligibility(
+            trained_features=keeper.numerical_features,
+            features_by_resource=features_by_resource,
+            resource_ids=windows.resource_ids,
+            errors=errors,
+            quantile=quantile,
+        )
         per_resource: dict[str, float] = {}
         for rid in sorted(set(windows.resource_ids)):
-            divergent = capture_features - features_by_resource.get(str(rid), set())
-            if divergent:
+            verdict = eligibility[str(rid)]
+            if verdict.eligible:
+                per_resource[str(rid)] = per_resource_margin * verdict.own_quantile
+                continue
+            # Reasons are recorded in gate order, so the first one names the
+            # gate that omits the resource; only that warning is printed.
+            reason = verdict.reasons[0]
+            if reason.startswith(REASON_DIVERGENT):
                 print(
-                    f"warning: resource {rid!r} lacks {len(divergent)} trained "
+                    f"warning: resource {rid!r} lacks {len(verdict.missing_features)} trained "
                     f"feature(s) the capture supplies elsewhere "
-                    f"({', '.join(sorted(divergent))}); its bake-time windows are "
+                    f"({', '.join(verdict.missing_features)}); its bake-time windows are "
                     "filled at -mean/std where serving fills neutral, so it is "
                     "omitted from the per-resource map and serves the global "
                     "threshold.",
                     file=sys.stderr,
                 )
-                continue
-            rerr = errors[windows.resource_ids == rid]
-            if rerr.size < MIN_PER_RESOURCE_WINDOWS:
+            elif reason.startswith(REASON_TOO_FEW_WINDOWS):
                 print(
-                    f"warning: resource {rid!r} has only {rerr.size} window(s) "
+                    f"warning: resource {rid!r} has only {verdict.n_windows} window(s) "
                     f"(< {MIN_PER_RESOURCE_WINDOWS}); omitting it from the "
                     "per-resource map, it will serve the global threshold.",
                     file=sys.stderr,
                 )
-                continue
-            own_quantile = float(np.quantile(rerr, quantile))
-            if own_quantile <= 0:
+            else:
                 print(
                     f"warning: resource {rid!r} has a non-positive healthy quantile; "
                     "omitting it from the per-resource map.",
                     file=sys.stderr,
                 )
-                continue
-            per_resource[str(rid)] = per_resource_margin * own_quantile
         block["per_resource"] = per_resource
         block["margin_multiplier"] = per_resource_margin
-    return block
+    return block, eligibility
 
 
 def bake(
@@ -205,9 +217,12 @@ def bake(
             "threshold will not match what the model sees on complete data.",
             file=sys.stderr,
         )
-    serving = compute_serving_block(
+    serving, eligibility = compute_serving_block(
         keeper, df_long, quantile=quantile, step=step, per_resource_margin=per_resource_margin
     )
+    if eligibility is not None:
+        reasons_map = {rid: verdict.reasons for rid, verdict in eligibility.items()}
+        print(f"per-resource eligibility: {json.dumps(reasons_map)}")
 
     checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
     checkpoint["serving"] = serving

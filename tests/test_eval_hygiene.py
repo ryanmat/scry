@@ -1,5 +1,5 @@
 # Description: Tests for scry.eval.hygiene: the three per-resource eligibility gates.
-# Description: Enforces the torch-free import contract for the hygiene module via a subprocess check.
+# Description: Pins the bake's delegation to them and the torch-free import contract.
 
 """Tests for the per-resource eligibility gates.
 
@@ -8,15 +8,26 @@ feature the capture supplies elsewhere is missing for the resource), the
 window floor (exact ``insufficient-windows:12<50`` format), and non-positive
 quantile. The capture-feature arithmetic, multi-gate accumulation, stringified
 key iteration order, and the torch-free import contract are pinned separately.
+The bake-delegation tests run the real bake on a gated synthetic fleet and pin
+the printed eligibility map, its agreement with the per_resource map, the
+unchanged stderr warning text, and the compute_serving_block exposure.
 """
 
 from __future__ import annotations
 
+import json
+import re
 import subprocess
 import sys
+from pathlib import Path
 
+import bake_serving_threshold as bake_mod
 import numpy as np
+import pandas as pd
+import pytest
+from synth import PROFILE, gen_capture, write_csv
 
+from scry.data.fetcher import fetch_full_capture
 from scry.eval.hygiene import (
     MIN_PER_RESOURCE_WINDOWS,
     REASON_DIVERGENT,
@@ -196,6 +207,95 @@ class TestIterationAndKeys:
         assert list(result.keys()) == ["7", "101"]
         assert all(isinstance(key, str) for key in result)
         assert result["7"].resource_id == "7"
+
+
+def _gated_fleet_csv(tmp_path: Path) -> str:
+    """Three resources: eligible, divergent-coverage, and under the window floor.
+
+    node-a is clean (58 windows at step 10). node-b drops cpuUsageNanoCores,
+    which the capture supplies elsewhere (gate 1). node-c has 140 samples, so
+    exactly 12 windows (gate 2).
+    """
+    df_a, _ = gen_capture("node-a", 600, seed=51)
+    df_b, _ = gen_capture("node-b", 600, seed=52)
+    df_b = df_b[df_b["metric_name"] != "cpuUsageNanoCores"]
+    df_c, _ = gen_capture("node-c", 140, seed=53)
+    fleet = pd.concat([df_a, df_b, df_c], ignore_index=True)
+    return write_csv(fleet, tmp_path / "gated_fleet.csv")
+
+
+class TestBakeDelegation:
+    def _printed_map(self, stdout: str) -> dict[str, list[str]]:
+        prefix = "per-resource eligibility: "
+        line = next(ln for ln in stdout.splitlines() if ln.startswith(prefix))
+        return json.loads(line.removeprefix(prefix))
+
+    def test_eligibility_map_agrees_with_per_resource_keys(
+        self, keeper_path: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        healthy = _gated_fleet_csv(tmp_path)
+        serving = bake_mod.bake(
+            keeper_path,
+            healthy,
+            profile=PROFILE,
+            per_resource_margin=2.0,
+            output=str(tmp_path / "gated.pt"),
+        )
+        eligibility = self._printed_map(capsys.readouterr().out)
+        assert set(eligibility) == {"node-a", "node-b", "node-c"}
+        eligible = {rid for rid, reasons in eligibility.items() if not reasons}
+        assert eligible == set(serving["per_resource"]) == {"node-a"}
+        assert eligibility["node-b"] == ["divergent-coverage:cpuUsageNanoCores"]
+        assert eligibility["node-c"] == ["insufficient-windows:12<50"]
+
+    def test_gate_warning_stderr_text_unchanged(
+        self, keeper_path: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        healthy = _gated_fleet_csv(tmp_path)
+        bake_mod.bake(
+            keeper_path,
+            healthy,
+            profile=PROFILE,
+            per_resource_margin=2.0,
+            output=str(tmp_path / "warned.pt"),
+        )
+        err = capsys.readouterr().err
+        assert (
+            "lacks 1 trained feature(s) the capture supplies elsewhere "
+            "(cpuUsageNanoCores); its bake-time windows are filled at -mean/std "
+            "where serving fills neutral, so it is omitted from the per-resource "
+            "map and serves the global threshold."
+        ) in err
+        assert (
+            "has only 12 window(s) (< 50); omitting it from the per-resource map, "
+            "it will serve the global threshold."
+        ) in err
+        assert err.count("warning: resource") == 2
+
+    def test_bake_module_delegates_to_hygiene(self) -> None:
+        assert bake_mod.per_resource_eligibility is per_resource_eligibility
+        assert bake_mod.MIN_PER_RESOURCE_WINDOWS == MIN_PER_RESOURCE_WINDOWS
+        # The constant is imported, never redefined locally (equality alone
+        # would not catch a shadowing `MIN_PER_RESOURCE_WINDOWS = 50`).
+        source = Path(bake_mod.__file__).read_text()
+        assert not re.search(r"^MIN_PER_RESOURCE_WINDOWS\s*=", source, re.MULTILINE)
+
+    async def test_compute_serving_block_exposes_eligibility(
+        self, keeper_path: str, tmp_path: Path
+    ) -> None:
+        healthy = _gated_fleet_csv(tmp_path)
+        keeper = bake_mod.load_keeper(keeper_path)
+        df_long = await fetch_full_capture(healthy, profile=PROFILE)
+
+        serving, eligibility = bake_mod.compute_serving_block(
+            keeper, df_long, quantile=0.99, step=10, per_resource_margin=2.0
+        )
+        assert eligibility is not None
+        assert {rid for rid, v in eligibility.items() if v.eligible} == set(serving["per_resource"])
+        assert isinstance(eligibility["node-b"], ResourceEligibility)
+
+        _, without_margin = bake_mod.compute_serving_block(keeper, df_long, quantile=0.99, step=10)
+        assert without_margin is None
 
 
 class TestTorchFreeImport:
