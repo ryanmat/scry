@@ -11,9 +11,12 @@ by resource. For each resource it reports the window count, the resource's own
 healthy quantile of the error, and the data span; for each supplied threshold it
 reports the window false-positive rate, the number of sustained anomalous runs
 (computed per resource in time order, so runs are temporal), and those runs
-normalized to a per-week rate. The same rollup pooled across all resources sits
-alongside, so a global threshold (set by the noisiest resource's tail) can be
-read against each resource's own baseline in one place.
+normalized to a per-week rate. Each row also carries the bake's per-resource
+eligibility verdict (``eligible``, ``reasons``) from the shared
+``scry.eval.hygiene`` gates, so an own quantile reads against whether the bake
+would serve it. The same rollup pooled across all resources sits alongside, so
+a global threshold (set by the noisiest resource's tail) can be read against
+each resource's own baseline in one place.
 
 Example:
     python scripts/healthy_fleet_report.py \\
@@ -43,6 +46,7 @@ except ModuleNotFoundError:  # running from outside scripts/ without an install
 
 from scry.data.feature_engineering import set_active_profile
 from scry.data.fetcher import fetch_full_capture
+from scry.eval.hygiene import per_resource_eligibility
 from scry.model.checkpoint import load_keeper
 from scry.model.reconstruction import reconstruction_errors
 from scry.utils.config import get_config
@@ -250,6 +254,25 @@ def analyze(
         sustain,
         threshold_quantile,
     )
+
+    # Annotate each row with the bake's eligibility verdict (the shared
+    # scry.eval.hygiene gates), so an own_q shown here is readable against
+    # whether the bake would actually serve it.
+    features_by_resource = {
+        str(rid): set(group["metric_name"].unique())
+        for rid, group in df_long.groupby("resource_id")
+    }
+    eligibility = per_resource_eligibility(
+        trained_features=keeper.numerical_features,
+        features_by_resource=features_by_resource,
+        resource_ids=windows.resource_ids,
+        errors=errors,
+        quantile=threshold_quantile,
+    )
+    for rid, row in report["resources"].items():
+        verdict = eligibility[rid]
+        row["eligible"] = verdict.eligible
+        row["reasons"] = verdict.reasons
 
     return {
         "model": model_path,

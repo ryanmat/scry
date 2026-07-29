@@ -9,6 +9,8 @@ error arrays through ``compute_report``. The end-to-end path is exercised throug
 ``analyze`` and ``main`` with the shared tiny keeper fixture over synthetic
 multi-resource captures read via the real object-store path, verifying the JSON
 schema and that a resource's own quantile matches an independent recomputation.
+The eligibility annotation is pinned on healthy and gated fixtures against the
+same reason strings the bake records.
 """
 
 from __future__ import annotations
@@ -159,7 +161,14 @@ def test_analyze_multi_resource_schema_and_own_quantile(keeper_path: str, tmp_pa
     assert set(res) == {"node-a", "node-b"}
     for name in ("node-a", "node-b"):
         entry = res[name]
-        assert set(entry) == {"n_windows", "own_q", "span_days", "thresholds"}
+        assert set(entry) == {
+            "n_windows",
+            "own_q",
+            "span_days",
+            "thresholds",
+            "eligible",
+            "reasons",
+        }
         assert entry["n_windows"] > 0
         assert isinstance(entry["own_q"], float)
         assert entry["span_days"] > 0.0
@@ -221,11 +230,59 @@ def test_main_writes_json_report(keeper_path: str, tmp_path: Path) -> None:
         "global",
     }
     entry = loaded["resources"]["node-a"]
-    assert set(entry) == {"n_windows", "own_q", "span_days", "thresholds"}
+    assert set(entry) == {"n_windows", "own_q", "span_days", "thresholds", "eligible", "reasons"}
     assert set(entry["thresholds"]) == {"0.05", "0.1"}
     for key in ("0.05", "0.1"):
         assert set(entry["thresholds"][key]) == {"window_fpr", "sustained_runs", "runs_per_week"}
     assert set(loaded["global"]) == {"n_windows", "own_q", "span_days", "thresholds"}
+
+
+def test_rows_carry_eligibility_on_healthy_fixture(keeper_path: str, tmp_path: Path) -> None:
+    """Healthy resources are annotated eligible with empty reasons; existing fields keep values."""
+    node_a, _ = gen_capture("node-a", 560, seed=2)
+    node_b, _ = gen_capture("node-b", 560, seed=7)
+    capture_csv = write_csv(pd.concat([node_a, node_b], ignore_index=True), tmp_path / "fleet.csv")
+
+    summary = fleet.analyze(
+        keeper_path, capture_csv, PROFILE, thresholds=[0.05], sustain=3, threshold_quantile=0.99
+    )
+    for name in ("node-a", "node-b"):
+        entry = summary["resources"][name]
+        assert entry["eligible"] is True
+        assert entry["reasons"] == []
+        assert entry["n_windows"] > 0
+        assert isinstance(entry["own_q"], float)
+        assert entry["span_days"] > 0.0
+        stats = entry["thresholds"]["0.05"]
+        assert set(stats) == {"window_fpr", "sustained_runs", "runs_per_week"}
+        assert stats["window_fpr"] is not None
+        assert stats["sustained_runs"] >= 0
+        assert stats["runs_per_week"] is not None
+
+
+def test_ineligible_resources_carry_bake_reason_strings(keeper_path: str, tmp_path: Path) -> None:
+    """Gated resources are annotated with the same reason strings the bake records.
+
+    node-b lacks a trained feature the capture supplies elsewhere (gate 1);
+    node-c has 140 samples, so exactly 12 windows at step 10 (gate 2).
+    """
+    node_a, _ = gen_capture("node-a", 600, seed=51)
+    node_b, _ = gen_capture("node-b", 600, seed=52)
+    node_b = node_b[node_b["metric_name"] != "cpuUsageNanoCores"]
+    node_c, _ = gen_capture("node-c", 140, seed=53)
+    fleet_df = pd.concat([node_a, node_b, node_c], ignore_index=True)
+    capture_csv = write_csv(fleet_df, tmp_path / "gated_fleet.csv")
+
+    summary = fleet.analyze(
+        keeper_path, capture_csv, PROFILE, thresholds=[], sustain=3, threshold_quantile=0.99
+    )
+    res = summary["resources"]
+    assert res["node-a"]["eligible"] is True
+    assert res["node-a"]["reasons"] == []
+    assert res["node-b"]["eligible"] is False
+    assert res["node-b"]["reasons"] == ["divergent-coverage:cpuUsageNanoCores"]
+    assert res["node-c"]["eligible"] is False
+    assert res["node-c"]["reasons"] == ["insufficient-windows:12<50"]
 
 
 def test_nonpositive_threshold_is_rejected(keeper_path: str, tmp_path: Path) -> None:
