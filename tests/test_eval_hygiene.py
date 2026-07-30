@@ -23,9 +23,8 @@ from pathlib import Path
 
 import bake_serving_threshold as bake_mod
 import numpy as np
-import pandas as pd
 import pytest
-from synth import PROFILE, gen_capture, write_csv
+from synth import PROFILE, gated_fleet_csv
 
 from scry.data.fetcher import fetch_full_capture
 from scry.eval.hygiene import (
@@ -209,21 +208,6 @@ class TestIterationAndKeys:
         assert result["7"].resource_id == "7"
 
 
-def _gated_fleet_csv(tmp_path: Path) -> str:
-    """Three resources: eligible, divergent-coverage, and under the window floor.
-
-    node-a is clean (58 windows at step 10). node-b drops cpuUsageNanoCores,
-    which the capture supplies elsewhere (gate 1). node-c has 140 samples, so
-    exactly 12 windows (gate 2).
-    """
-    df_a, _ = gen_capture("node-a", 600, seed=51)
-    df_b, _ = gen_capture("node-b", 600, seed=52)
-    df_b = df_b[df_b["metric_name"] != "cpuUsageNanoCores"]
-    df_c, _ = gen_capture("node-c", 140, seed=53)
-    fleet = pd.concat([df_a, df_b, df_c], ignore_index=True)
-    return write_csv(fleet, tmp_path / "gated_fleet.csv")
-
-
 class TestBakeDelegation:
     def _printed_map(self, stdout: str) -> dict[str, list[str]]:
         prefix = "per-resource eligibility: "
@@ -233,7 +217,7 @@ class TestBakeDelegation:
     def test_eligibility_map_agrees_with_per_resource_keys(
         self, keeper_path: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        healthy = _gated_fleet_csv(tmp_path)
+        healthy = gated_fleet_csv(tmp_path)
         serving = bake_mod.bake(
             keeper_path,
             healthy,
@@ -251,7 +235,7 @@ class TestBakeDelegation:
     def test_gate_warning_stderr_text_unchanged(
         self, keeper_path: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        healthy = _gated_fleet_csv(tmp_path)
+        healthy = gated_fleet_csv(tmp_path)
         bake_mod.bake(
             keeper_path,
             healthy,
@@ -283,7 +267,7 @@ class TestBakeDelegation:
     async def test_compute_serving_block_exposes_eligibility(
         self, keeper_path: str, tmp_path: Path
     ) -> None:
-        healthy = _gated_fleet_csv(tmp_path)
+        healthy = gated_fleet_csv(tmp_path)
         keeper = bake_mod.load_keeper(keeper_path)
         df_long = await fetch_full_capture(healthy, profile=PROFILE)
 

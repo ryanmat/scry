@@ -1,7 +1,7 @@
-# Description: Tests for scry.eval.scoring: keeper windowing and the explicit scoring grids.
-# Description: Pins the validate_incident alias, the lazy exports, and the wall-clock cadence rule.
+# Description: Tests for scry.eval scoring and candidates: keeper windowing, grids, policies.
+# Description: Pins the validate_incident alias, the lazy exports, the cadence rule, and resolution.
 
-"""Tests for the eval scoring primitives.
+"""Tests for the eval scoring primitives, candidates, and threshold policies.
 
 ``windows_for_keeper`` is pinned through the per-resource window-count
 arithmetic on a synthetic capture, the alias identity that keeps
@@ -11,20 +11,37 @@ still leaves torch unimported. ``ScoringGrid`` is pinned through the serving
 preset, identity selection without a cadence, the wall-clock (floored, not
 span-anchored) tick lattice, per-resource per-tick greatest-end selection,
 and single-keep dedup when one window is the greatest for several ticks.
+``ReconstructionCandidate`` is pinned through ScoreSet provenance meta, the
+missing-model contract, the two-grid count divergence, and the empty capture.
+The threshold policies are pinned through per-source resolution, the
+per-resource-split fit half against a pooled-split counterfactual,
+JSON-serializable describe() provenance, and the empty-fit ValueError that
+keeps the dead fallback dead. ``PerResourceMargin`` is additionally pinned
+bit-identically (float.hex) against the real bake on one calibration, through
+the gated-fleet hygiene fallback routing, the eligibility reasons in
+describe(), and the positive-finite margin guard. ``ServingBlock`` is pinned
+through the baked-global resolution, the patched per_resource map beating the
+global for the mapped id, additive-key tolerance, the missing-block error,
+the two-scale per-resource-vs-pooled exceedance miniature, and the
+lazy-export completeness of every candidate member.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import subprocess
 import sys
 from pathlib import Path
 
+import bake_serving_threshold as bake_mod
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 import validate_incident as vi
-from synth import PROFILE, SEQ_LEN, gen_capture, write_csv
+from synth import PROFILE, SEQ_LEN, gated_fleet_csv, gen_capture, write_csv
 
 from scry.data.fetcher import fetch_full_capture
 from scry.model.checkpoint import load_keeper
@@ -261,3 +278,461 @@ class TestPerResourceTimeSplit:
             assert len(fit_ends) == 12
             assert len(eval_ends) == 6
             assert min(eval_ends) - max(fit_ends) >= self._SEQ_MINUTES
+
+
+class TestReconstructionCandidate:
+    def test_score_returns_scoreset_with_provenance_meta(
+        self, keeper_path: str, fleet_df: pd.DataFrame
+    ) -> None:
+        from scry.eval.candidate import ReconstructionCandidate, ScoreSet
+        from scry.eval.scoring import ScoringGrid
+
+        grid = ScoringGrid(label="offline-20min", step_samples=10)
+        score_set = ReconstructionCandidate(keeper_path, profile=PROFILE).score(fleet_df, grid)
+
+        assert isinstance(score_set, ScoreSet)
+        assert score_set.errors.dtype == np.float64
+        assert score_set.errors.ndim == 1
+        n = score_set.errors.shape[0]
+        assert len(score_set.end_times) == n
+        assert score_set.resource_ids.shape[0] == n
+        assert n == 2 * ((200 - SEQ_LEN) // 10 + 1)
+        assert score_set.grid is grid
+
+        expected_sha = hashlib.sha256(Path(keeper_path).read_bytes()).hexdigest()
+        keeper = load_keeper(keeper_path)
+        assert score_set.meta["model_path"] == keeper_path
+        assert score_set.meta["model_sha256"] == expected_sha
+        assert score_set.meta["profile"] == PROFILE
+        assert score_set.meta["seq_len"] == int(keeper.config["seq_len"])
+        assert score_set.meta["step"] == 10
+        assert score_set.meta["device"] == keeper.device
+
+    def test_missing_model_path_raises_file_not_found(self) -> None:
+        from scry.eval.candidate import ReconstructionCandidate
+        from scry.eval.scoring import ScoringGrid
+
+        candidate = ReconstructionCandidate("models/does_not_exist.pt", profile=PROFILE)
+        with pytest.raises(FileNotFoundError):
+            candidate.score(pd.DataFrame(), ScoringGrid(label="native", step_samples=1))
+
+    def test_grid_changes_over_threshold_counts(self, keeper_path: str, tmp_path: Path) -> None:
+        # The 2-vs-3 finding in miniature: one excursion, two grids, different
+        # over-threshold window counts, each keyed by its grid label. The spike
+        # spans 55 samples so the over-window end interval [600, 683] holds 8
+        # offline windows (ends on 9 mod 10) vs 9 serving-lattice windows (ends
+        # on 0 mod 10); the q99 threshold additionally leaves one healthy
+        # quantile-tail window over per grid, so the counts differ by one
+        # structurally either way.
+        from scry.eval.candidate import ReconstructionCandidate
+        from scry.eval.scoring import SERVING_GRID, ScoringGrid
+
+        df, _ = gen_capture("node-a", 700, seed=81, spike=(600, 655, 40.0))
+        csv = write_csv(df, tmp_path / "excursion.csv")
+        df_long = asyncio.run(fetch_full_capture(csv, profile=PROFILE))
+
+        candidate = ReconstructionCandidate(keeper_path, profile=PROFILE)
+        offline = ScoringGrid(label="offline-20min", step_samples=10)
+
+        counts: dict[str, int] = {}
+        thresholds: dict[str, float] = {}
+        for grid in (offline, SERVING_GRID):
+            score_set = candidate.score(df_long, grid)
+            spike_start = df_long["timestamp"].min() + pd.Timedelta(minutes=600)
+            healthy = score_set.errors[score_set.end_times < spike_start]
+            thresholds[grid.label] = float(np.quantile(healthy, 0.99))
+            counts[grid.label] = int((score_set.errors > thresholds[grid.label]).sum())
+
+        assert set(counts) == {"offline-20min", "serving-10min"}
+        assert counts["offline-20min"] != counts["serving-10min"]
+
+    def test_empty_input_scores_to_empty_arrays(self, keeper_path: str) -> None:
+        from scry.eval.candidate import ReconstructionCandidate
+        from scry.eval.scoring import ScoringGrid
+
+        empty = pd.DataFrame(columns=["resource_id", "metric_name", "timestamp", "value"])
+        score_set = ReconstructionCandidate(keeper_path, profile=PROFILE).score(
+            empty, ScoringGrid(label="native", step_samples=1)
+        )
+        assert score_set.errors.shape == (0,)
+        assert len(score_set.end_times) == 0
+        assert score_set.resource_ids.shape == (0,)
+
+
+def _policy_score_set(errors: np.ndarray, ends: pd.DatetimeIndex, ids: np.ndarray):
+    # A hand-built ScoreSet for policy tests; meta carries the seq_len=30 /
+    # step=5 the gap convention derives from (ceil(30 / 5) = 6).
+    from scry.eval.candidate import ScoreSet
+    from scry.eval.scoring import ScoringGrid
+
+    return ScoreSet(
+        errors=np.asarray(errors, dtype=np.float64),
+        end_times=ends,
+        resource_ids=np.asarray(ids),
+        grid=ScoringGrid(label="native", step_samples=5),
+        meta={"seq_len": 30, "step": 5},
+    )
+
+
+class TestThresholdPolicies:
+    def test_global_override_resolves_every_resource(self) -> None:
+        from scry.eval.candidate import GlobalOverride
+
+        policy = GlobalOverride(0.25)
+        assert policy.resolve("anything") == (0.25, "override")
+        assert policy.resolve("worker-1") == (0.25, "override")
+        described = policy.describe()
+        assert described["type"] == "GlobalOverride"
+        assert described["threshold"] == 0.25
+
+    def test_reference_quantile_pools_the_full_reference(self) -> None:
+        # Errors increase over time, so an accidental fit/eval split inside the
+        # policy would drag the q99 threshold far below the full-set quantile.
+        from scry.eval.candidate import ReferenceQuantile
+
+        errors = np.arange(1.0, 101.0)
+        ends = pd.date_range("2026-01-01T00:00:00Z", periods=100, freq="5min")
+        ids = np.array(["node-a", "node-b"] * 50)
+        reference = _policy_score_set(errors, ends, ids)
+
+        median = ReferenceQuantile(reference, quantile=0.5)
+        assert median.resolve("node-a") == (50.5, "reference")
+        tail = ReferenceQuantile(reference, quantile=0.99)
+        assert tail.resolve("node-b") == (float(np.quantile(errors, 0.99)), "reference")
+        assert tail.resolve("node-a") == tail.resolve("node-b")
+
+    def test_healthy_split_fits_on_the_per_resource_fit_half(self) -> None:
+        # Drift in each resource's second half, with node-b's span shifted 60
+        # minutes later: a pooled time_split's first-half fit would absorb
+        # node-a's drifted windows (ends 60..85), so only the per-resource
+        # split resolves the all-low fit-half quantile pinned here.
+        from scry.eval.candidate import HealthySplitQuantile
+
+        low_a = np.linspace(0.10, 0.21, 12)
+        high_a = np.linspace(10.0, 11.1, 12)
+        low_b = np.linspace(0.30, 0.41, 12)
+        high_b = np.linspace(20.0, 21.1, 12)
+        base = pd.Timestamp("2026-01-01T00:00:00Z")
+        ends_a = [base + pd.Timedelta(minutes=m * 5) for m in range(24)]
+        ends_b = [base + pd.Timedelta(minutes=60 + m * 5) for m in range(24)]
+        ends = pd.DatetimeIndex(ends_a + ends_b)
+        ids = np.array(["node-a"] * 24 + ["node-b"] * 24)
+        errors = np.concatenate([low_a, high_a, low_b, high_b])
+        scores = _policy_score_set(errors, ends, ids)
+
+        policy = HealthySplitQuantile(scores, quantile=0.99)
+        threshold, source = policy.resolve("node-a")
+        assert source == "healthy_split"
+        fit_expected = np.concatenate([low_a, low_b])
+        assert threshold == float(np.quantile(fit_expected, 0.99))
+        assert threshold != float(np.quantile(errors, 0.99))
+        assert policy.resolve("node-b") == (threshold, "healthy_split")
+
+    def test_describe_is_json_serializable_with_resolved_parameters(self) -> None:
+        from scry.eval.candidate import GlobalOverride, HealthySplitQuantile, ReferenceQuantile
+
+        reference = _policy_score_set(
+            np.linspace(0.1, 0.5, 60),
+            pd.date_range("2026-01-01T00:00:00Z", periods=60, freq="5min"),
+            np.array(["node-a"] * 60),
+        )
+        policies = [
+            GlobalOverride(0.25),
+            ReferenceQuantile(reference, quantile=0.99),
+            HealthySplitQuantile(reference, quantile=0.99),
+        ]
+        for policy in policies:
+            described = policy.describe()
+            json.dumps(described)
+            assert described["type"] == type(policy).__name__
+            assert described["threshold"] == policy.resolve("node-a")[0]
+
+        assert policies[1].describe()["quantile"] == 0.99
+        assert policies[1].describe()["n_reference_windows"] == 60
+        assert policies[1].describe()["grid"] == "native"
+        assert policies[2].describe()["quantile"] == 0.99
+        assert policies[2].describe()["gap"] == 6
+        assert policies[2].describe()["n_fit_windows"] == 30
+        assert policies[2].describe()["grid"] == "native"
+
+    def test_empty_fit_raises_instead_of_falling_back(self) -> None:
+        # The dead empty-fit fallback in healthy_threshold stays dead: an
+        # empty calibration population is an error, never fit-on-everything.
+        from scry.eval.candidate import HealthySplitQuantile, ReferenceQuantile
+
+        empty = _policy_score_set(
+            np.zeros(0), pd.DatetimeIndex([], tz="UTC"), np.array([], dtype=str)
+        )
+        with pytest.raises(ValueError, match="No healthy windows"):
+            ReferenceQuantile(empty, quantile=0.99)
+        with pytest.raises(ValueError, match="No healthy windows"):
+            HealthySplitQuantile(empty, quantile=0.99)
+
+    def test_policy_names_resolve_from_package_root(self) -> None:
+        import scry.eval
+        from scry.eval import candidate
+
+        names = (
+            "ThresholdPolicy",
+            "GlobalOverride",
+            "ReferenceQuantile",
+            "HealthySplitQuantile",
+            "PerResourceMargin",
+        )
+        for name in names:
+            assert getattr(scry.eval, name) is getattr(candidate, name)
+            assert name in scry.eval.__all__
+
+
+class TestPerResourceMargin:
+    def test_bit_identical_to_the_bake(self, keeper_path: str, fleet_df: pd.DataFrame) -> None:
+        # Same calibration, same quantile, same margin: every policy-resolved
+        # per-resource threshold reproduces the baked map bit for bit
+        # (float.hex). Step 1 keeps both 200-sample nodes over the 50-window
+        # floor, so the map covers the whole fleet.
+        from scry.eval.candidate import PerResourceMargin, ReconstructionCandidate
+        from scry.eval.scoring import ScoringGrid
+
+        keeper = load_keeper(keeper_path)
+        block, _ = bake_mod.compute_serving_block(
+            keeper, fleet_df, quantile=0.99, step=1, per_resource_margin=2.0
+        )
+        assert set(block["per_resource"]) == {"node-a", "node-b"}
+
+        scores = ReconstructionCandidate(keeper_path, profile=PROFILE).score(
+            fleet_df, ScoringGrid(label="native", step_samples=1)
+        )
+        features = {
+            str(rid): set(group["metric_name"].unique())
+            for rid, group in fleet_df.groupby("resource_id")
+        }
+        policy = PerResourceMargin(
+            scores,
+            margin=2.0,
+            fallback=block["threshold"],
+            trained_features=keeper.numerical_features,
+            features_by_resource=features,
+            quantile=0.99,
+        )
+        for rid, baked in block["per_resource"].items():
+            threshold, source = policy.resolve(rid)
+            assert source == "per_resource"
+            assert threshold.hex() == float(baked).hex()
+
+    def test_hygiene_gates_route_to_fallback(self, keeper_path: str, tmp_path: Path) -> None:
+        # The gated fleet: node-a eligible, node-b divergent-coverage, node-c
+        # under the window floor at step 10; a ghost id never scored at all.
+        # Everything but node-a serves the fallback.
+        from scry.eval.candidate import PerResourceMargin, ReconstructionCandidate
+        from scry.eval.scoring import ScoringGrid
+
+        csv = gated_fleet_csv(tmp_path)
+        df_long = asyncio.run(fetch_full_capture(csv, profile=PROFILE))
+        keeper = load_keeper(keeper_path)
+        scores = ReconstructionCandidate(keeper_path, profile=PROFILE).score(
+            df_long, ScoringGrid(label="offline-step10", step_samples=10)
+        )
+        features = {
+            str(rid): set(group["metric_name"].unique())
+            for rid, group in df_long.groupby("resource_id")
+        }
+        policy = PerResourceMargin(
+            scores,
+            margin=2.0,
+            fallback=0.5,
+            trained_features=keeper.numerical_features,
+            features_by_resource=features,
+            quantile=0.99,
+        )
+        own = scores.errors[scores.resource_ids.astype(str) == "node-a"]
+        assert policy.resolve("node-a") == (2.0 * float(np.quantile(own, 0.99)), "per_resource")
+        assert policy.resolve("node-b") == (0.5, "per_resource_fallback")
+        assert policy.resolve("node-c") == (0.5, "per_resource_fallback")
+        assert policy.resolve("node-ghost") == (0.5, "per_resource_fallback")
+
+    def test_describe_carries_map_fallback_and_eligibility(self) -> None:
+        from scry.eval.candidate import PerResourceMargin
+
+        errors = np.concatenate([np.linspace(0.1, 0.3, 60), np.linspace(0.2, 0.4, 12)])
+        ends = pd.date_range("2026-01-01T00:00:00Z", periods=72, freq="5min")
+        ids = np.array(["node-a"] * 60 + ["node-b"] * 12)
+        calibration = _policy_score_set(errors, ends, ids)
+        policy = PerResourceMargin(
+            calibration,
+            margin=2.0,
+            fallback=0.5,
+            trained_features=("cpu",),
+            features_by_resource={"node-a": {"cpu"}, "node-b": {"cpu"}},
+            quantile=0.99,
+        )
+        described = policy.describe()
+        json.dumps(described)
+        assert described["type"] == "PerResourceMargin"
+        assert described["margin"] == 2.0
+        assert described["quantile"] == 0.99
+        assert described["fallback"] == 0.5
+        assert set(described["per_resource"]) == {"node-a"}
+        assert described["per_resource"]["node-a"] == policy.resolve("node-a")[0]
+        assert described["eligibility"]["node-a"] == []
+        assert described["eligibility"]["node-b"] == ["insufficient-windows:12<50"]
+        assert described["grid"] == "native"
+
+    def test_invalid_margin_raises(self) -> None:
+        from scry.eval.candidate import PerResourceMargin
+
+        calibration = _policy_score_set(
+            np.linspace(0.1, 0.3, 60),
+            pd.date_range("2026-01-01T00:00:00Z", periods=60, freq="5min"),
+            np.array(["node-a"] * 60),
+        )
+        for bad in (0.0, -1.0, float("nan"), float("inf")):
+            with pytest.raises(ValueError, match="margin must be a positive finite number"):
+                PerResourceMargin(
+                    calibration,
+                    margin=bad,
+                    fallback=0.5,
+                    trained_features=("cpu",),
+                    features_by_resource={"node-a": {"cpu"}},
+                )
+
+
+def _patched_serving_keeper(source_path: str, tmp_path: Path, **serving_keys: object) -> str:
+    # The test_reconstruction_endpoint patch pattern: copy the serving keeper
+    # with extra keys merged into its serving block.
+    ckpt = torch.load(source_path, map_location="cpu", weights_only=False)
+    ckpt["serving"] = dict(ckpt["serving"], **serving_keys)
+    out = str(tmp_path / "patched_keeper.pt")
+    torch.save(ckpt, out)
+    return out
+
+
+class TestServingBlock:
+    def test_resolves_baked_global_without_map(self, serving_keeper_path: str) -> None:
+        from scry.eval.candidate import ServingBlock
+
+        baked = torch.load(serving_keeper_path, map_location="cpu", weights_only=False)["serving"]
+        policy = ServingBlock(serving_keeper_path)
+        assert policy.resolve("any-node") == (baked["threshold"], "global")
+        described = policy.describe()
+        json.dumps(described)
+        assert described["type"] == "ServingBlock"
+        assert described["model_path"] == serving_keeper_path
+        assert described["serving"]["threshold"] == baked["threshold"]
+        assert described["serving"]["quantile"] == baked["quantile"]
+        assert described["serving"]["recon_metric"] == baked["recon_metric"]
+
+    def test_per_resource_entry_beats_global_for_mapped_id(
+        self, serving_keeper_path: str, tmp_path: Path
+    ) -> None:
+        # A per_resource map injected into a copy of the serving keeper: the
+        # mapped id resolves its entry, everyone else the global -- the
+        # predictor's order absent the env override.
+        from scry.eval.candidate import ServingBlock
+
+        global_threshold = torch.load(
+            serving_keeper_path, map_location="cpu", weights_only=False
+        )["serving"]["threshold"]
+        path = _patched_serving_keeper(
+            serving_keeper_path, tmp_path, per_resource={"node-a": 0.007}, margin_multiplier=2.0
+        )
+
+        policy = ServingBlock(path)
+        assert policy.resolve("node-a") == (0.007, "per_resource")
+        assert policy.resolve("node-b") == (global_threshold, "global")
+
+    def test_tolerates_additive_serving_keys(
+        self, serving_keeper_path: str, tmp_path: Path
+    ) -> None:
+        from scry.eval.candidate import ServingBlock
+
+        path = _patched_serving_keeper(
+            serving_keeper_path,
+            tmp_path,
+            calibration_days=14.0,
+            rebaked_at="2026-07-26T12:00:00Z",
+            some_future_key="tolerated",
+        )
+
+        policy = ServingBlock(path)
+        _, source = policy.resolve("any-node")
+        assert source == "global"
+        described = policy.describe()
+        json.dumps(described)
+        assert described["serving"]["calibration_days"] == 14.0
+        assert described["serving"]["rebaked_at"] == "2026-07-26T12:00:00Z"
+        assert described["serving"]["some_future_key"] == "tolerated"
+
+    def test_missing_serving_block_raises(self, keeper_path: str) -> None:
+        from scry.eval.candidate import ServingBlock
+
+        with pytest.raises(ValueError, match="no serving block"):
+            ServingBlock(keeper_path)
+
+    def test_two_resource_lead_in_exceedance_per_resource_vs_pooled(self, tmp_path: Path) -> None:
+        # The phase-4 defect in miniature: a quiet and a noisy resource, each
+        # counted at its OWN resolved threshold; the pooled count at the global
+        # threshold (deliberately fed the whole fleet as one slice) is labeled
+        # pooled_ and misses quiet's exceedances while flooding on noisy's
+        # baseline. Metrics packaging lands in PR 5; this exercises
+        # slice_stats + the policy directly.
+        from scry.eval.candidate import ServingBlock
+        from scry.eval.detection import slice_stats
+
+        serving = {
+            "threshold": 1.0,
+            "quantile": 0.99,
+            "healthy_fpr": 0.0,
+            "n_calibration_windows": 200,
+            "recon_metric": "numerical_mse_from_mu",
+            "per_resource": {"quiet": 0.2, "noisy": 2.0},
+            "margin_multiplier": 2.0,
+        }
+        path = str(tmp_path / "two_scale.pt")
+        torch.save({"serving": serving}, path)
+        policy = ServingBlock(path)
+
+        quiet = np.full(20, 0.1)
+        quiet[5:8] = 0.3  # one sustained excursion over quiet's own 0.2
+        quiet[15] = 0.3  # plus one isolated exceedance
+        noisy = np.full(20, 1.5)  # baseline over the pooled 1.0, under its own 2.0
+        noisy[10:13] = 2.5  # one sustained excursion over noisy's own 2.0
+        ends = pd.date_range("2026-01-01T00:00:00Z", periods=20, freq="5min")
+
+        lead_in_windows_over: dict[str, int] = {}
+        for rid, errors in (("quiet", quiet), ("noisy", noisy)):
+            threshold, source = policy.resolve(rid)
+            assert source == "per_resource"
+            stats = slice_stats(errors, ends, ends[0], ends[-1], [threshold], sustain=3)
+            over = stats[f"over_{threshold:.4f}"]
+            assert over["sustained_runs"] == 1
+            lead_in_windows_over[rid] = over["windows_over"]
+        assert lead_in_windows_over == {"quiet": 4, "noisy": 3}
+
+        pooled_threshold, pooled_source = policy.resolve("fleet-as-a-whole")
+        assert pooled_source == "global"
+        pooled_stats = slice_stats(
+            np.concatenate([quiet, noisy]),
+            ends.append(ends),
+            ends[0],
+            ends[-1],
+            [pooled_threshold],
+            sustain=3,
+        )
+        pooled_lead_in_windows_over = pooled_stats[f"over_{pooled_threshold:.4f}"]["windows_over"]
+        assert pooled_lead_in_windows_over == 20
+        assert all(pooled_lead_in_windows_over != n for n in lead_in_windows_over.values())
+
+    def test_lazy_exports_cover_all_candidate_members(self) -> None:
+        import scry.eval
+        from scry.eval import candidate
+
+        public = {
+            name
+            for name, obj in vars(candidate).items()
+            if not name.startswith("_")
+            and getattr(obj, "__module__", None) == "scry.eval.candidate"
+        }
+        assert "ServingBlock" in public
+        assert public <= set(scry.eval.__all__)
+        for name in public:
+            assert getattr(scry.eval, name) is getattr(candidate, name)
