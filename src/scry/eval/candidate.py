@@ -16,10 +16,12 @@ against, as ``(threshold, source)``. ``GlobalOverride`` states one number,
 ``ReferenceQuantile`` fits the pooled quantile of a separate healthy reference
 ScoreSet (no split; the capture under evaluation is disjoint from the
 reference), ``HealthySplitQuantile`` fits on the pooled fit halves of the
-per-resource time split, holding the eval halves out, and
+per-resource time split, holding the eval halves out,
 ``PerResourceMargin`` bakes margin-times-own-quantile per resource behind the
 hygiene gates, falling back to a global threshold for ineligible and unknown
-resources. The quantile-fit policies raise ValueError on an empty fit
+resources, and ``ServingBlock`` reads a checkpoint's baked serving block and
+resolves per_resource map hit else global -- the predictor's order absent the
+env override. The quantile-fit policies raise ValueError on an empty fit
 population; none falls back to fitting on everything.
 """
 
@@ -35,6 +37,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import torch
 
 from scry.data.feature_engineering import set_active_profile
 from scry.eval.hygiene import per_resource_eligibility
@@ -294,4 +297,53 @@ class PerResourceMargin(ThresholdPolicy):
             "per_resource": dict(self._per_resource),
             "eligibility": {rid: list(reasons) for rid, reasons in self._eligibility.items()},
             "grid": self._grid_label,
+        }
+
+
+class ServingBlock(ThresholdPolicy):
+    """Thresholds from a checkpoint's baked serving block; source
+    ``"per_resource"`` or ``"global"``.
+
+    Reads ``checkpoint["serving"]`` -- ``{threshold, quantile, healthy_fpr,
+    n_calibration_windows, recon_metric}`` plus the optional ``{per_resource,
+    margin_multiplier}`` and any additive key (the deployed re-bake adds
+    ``calibration_days`` and ``rebaked_at``) -- and resolves the way the
+    predictor does absent the env override: per_resource map hit, else the
+    global threshold. The whole block passes through ``describe()`` so
+    additive keys stay visible in provenance.
+
+    Args:
+        model_path: Path to a checkpoint carrying a baked serving block.
+
+    Raises:
+        FileNotFoundError: If the checkpoint path does not exist.
+        ValueError: If the checkpoint has no serving block.
+    """
+
+    def __init__(self, model_path: str):
+        checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
+        serving = checkpoint.get("serving")
+        if not serving:
+            raise ValueError(
+                f"checkpoint {model_path!r} has no serving block; bake one with "
+                "scripts/bake_serving_threshold.py first"
+            )
+        self._model_path = model_path
+        self._serving: dict[str, Any] = dict(serving)
+        self._per_resource = {
+            str(rid): float(value) for rid, value in (serving.get("per_resource") or {}).items()
+        }
+        self._threshold = float(serving["threshold"])
+
+    def resolve(self, resource_id: str) -> tuple[float, str]:
+        threshold = self._per_resource.get(str(resource_id))
+        if threshold is not None:
+            return threshold, "per_resource"
+        return self._threshold, "global"
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            "type": "ServingBlock",
+            "model_path": self._model_path,
+            "serving": dict(self._serving),
         }

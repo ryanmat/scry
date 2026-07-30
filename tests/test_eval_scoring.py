@@ -19,7 +19,11 @@ JSON-serializable describe() provenance, and the empty-fit ValueError that
 keeps the dead fallback dead. ``PerResourceMargin`` is additionally pinned
 bit-identically (float.hex) against the real bake on one calibration, through
 the gated-fleet hygiene fallback routing, the eligibility reasons in
-describe(), and the positive-finite margin guard.
+describe(), and the positive-finite margin guard. ``ServingBlock`` is pinned
+through the baked-global resolution, the patched per_resource map beating the
+global for the mapped id, additive-key tolerance, the missing-block error,
+the two-scale per-resource-vs-pooled exceedance miniature, and the
+lazy-export completeness of every candidate member.
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ import bake_serving_threshold as bake_mod
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 import validate_incident as vi
 from synth import PROFILE, SEQ_LEN, gated_fleet_csv, gen_capture, write_csv
 
@@ -589,3 +594,145 @@ class TestPerResourceMargin:
                     trained_features=("cpu",),
                     features_by_resource={"node-a": {"cpu"}},
                 )
+
+
+def _patched_serving_keeper(source_path: str, tmp_path: Path, **serving_keys: object) -> str:
+    # The test_reconstruction_endpoint patch pattern: copy the serving keeper
+    # with extra keys merged into its serving block.
+    ckpt = torch.load(source_path, map_location="cpu", weights_only=False)
+    ckpt["serving"] = dict(ckpt["serving"], **serving_keys)
+    out = str(tmp_path / "patched_keeper.pt")
+    torch.save(ckpt, out)
+    return out
+
+
+class TestServingBlock:
+    def test_resolves_baked_global_without_map(self, serving_keeper_path: str) -> None:
+        from scry.eval.candidate import ServingBlock
+
+        baked = torch.load(serving_keeper_path, map_location="cpu", weights_only=False)["serving"]
+        policy = ServingBlock(serving_keeper_path)
+        assert policy.resolve("any-node") == (baked["threshold"], "global")
+        described = policy.describe()
+        json.dumps(described)
+        assert described["type"] == "ServingBlock"
+        assert described["model_path"] == serving_keeper_path
+        assert described["serving"]["threshold"] == baked["threshold"]
+        assert described["serving"]["quantile"] == baked["quantile"]
+        assert described["serving"]["recon_metric"] == baked["recon_metric"]
+
+    def test_per_resource_entry_beats_global_for_mapped_id(
+        self, serving_keeper_path: str, tmp_path: Path
+    ) -> None:
+        # A per_resource map injected into a copy of the serving keeper: the
+        # mapped id resolves its entry, everyone else the global -- the
+        # predictor's order absent the env override.
+        from scry.eval.candidate import ServingBlock
+
+        global_threshold = torch.load(
+            serving_keeper_path, map_location="cpu", weights_only=False
+        )["serving"]["threshold"]
+        path = _patched_serving_keeper(
+            serving_keeper_path, tmp_path, per_resource={"node-a": 0.007}, margin_multiplier=2.0
+        )
+
+        policy = ServingBlock(path)
+        assert policy.resolve("node-a") == (0.007, "per_resource")
+        assert policy.resolve("node-b") == (global_threshold, "global")
+
+    def test_tolerates_additive_serving_keys(
+        self, serving_keeper_path: str, tmp_path: Path
+    ) -> None:
+        from scry.eval.candidate import ServingBlock
+
+        path = _patched_serving_keeper(
+            serving_keeper_path,
+            tmp_path,
+            calibration_days=14.0,
+            rebaked_at="2026-07-26T12:00:00Z",
+            some_future_key="tolerated",
+        )
+
+        policy = ServingBlock(path)
+        _, source = policy.resolve("any-node")
+        assert source == "global"
+        described = policy.describe()
+        json.dumps(described)
+        assert described["serving"]["calibration_days"] == 14.0
+        assert described["serving"]["rebaked_at"] == "2026-07-26T12:00:00Z"
+        assert described["serving"]["some_future_key"] == "tolerated"
+
+    def test_missing_serving_block_raises(self, keeper_path: str) -> None:
+        from scry.eval.candidate import ServingBlock
+
+        with pytest.raises(ValueError, match="no serving block"):
+            ServingBlock(keeper_path)
+
+    def test_two_resource_lead_in_exceedance_per_resource_vs_pooled(self, tmp_path: Path) -> None:
+        # The phase-4 defect in miniature: a quiet and a noisy resource, each
+        # counted at its OWN resolved threshold; the pooled count at the global
+        # threshold (deliberately fed the whole fleet as one slice) is labeled
+        # pooled_ and misses quiet's exceedances while flooding on noisy's
+        # baseline. Metrics packaging lands in PR 5; this exercises
+        # slice_stats + the policy directly.
+        from scry.eval.candidate import ServingBlock
+        from scry.eval.detection import slice_stats
+
+        serving = {
+            "threshold": 1.0,
+            "quantile": 0.99,
+            "healthy_fpr": 0.0,
+            "n_calibration_windows": 200,
+            "recon_metric": "numerical_mse_from_mu",
+            "per_resource": {"quiet": 0.2, "noisy": 2.0},
+            "margin_multiplier": 2.0,
+        }
+        path = str(tmp_path / "two_scale.pt")
+        torch.save({"serving": serving}, path)
+        policy = ServingBlock(path)
+
+        quiet = np.full(20, 0.1)
+        quiet[5:8] = 0.3  # one sustained excursion over quiet's own 0.2
+        quiet[15] = 0.3  # plus one isolated exceedance
+        noisy = np.full(20, 1.5)  # baseline over the pooled 1.0, under its own 2.0
+        noisy[10:13] = 2.5  # one sustained excursion over noisy's own 2.0
+        ends = pd.date_range("2026-01-01T00:00:00Z", periods=20, freq="5min")
+
+        lead_in_windows_over: dict[str, int] = {}
+        for rid, errors in (("quiet", quiet), ("noisy", noisy)):
+            threshold, source = policy.resolve(rid)
+            assert source == "per_resource"
+            stats = slice_stats(errors, ends, ends[0], ends[-1], [threshold], sustain=3)
+            over = stats[f"over_{threshold:.4f}"]
+            assert over["sustained_runs"] == 1
+            lead_in_windows_over[rid] = over["windows_over"]
+        assert lead_in_windows_over == {"quiet": 4, "noisy": 3}
+
+        pooled_threshold, pooled_source = policy.resolve("fleet-as-a-whole")
+        assert pooled_source == "global"
+        pooled_stats = slice_stats(
+            np.concatenate([quiet, noisy]),
+            ends.append(ends),
+            ends[0],
+            ends[-1],
+            [pooled_threshold],
+            sustain=3,
+        )
+        pooled_lead_in_windows_over = pooled_stats[f"over_{pooled_threshold:.4f}"]["windows_over"]
+        assert pooled_lead_in_windows_over == 20
+        assert all(pooled_lead_in_windows_over != n for n in lead_in_windows_over.values())
+
+    def test_lazy_exports_cover_all_candidate_members(self) -> None:
+        import scry.eval
+        from scry.eval import candidate
+
+        public = {
+            name
+            for name, obj in vars(candidate).items()
+            if not name.startswith("_")
+            and getattr(obj, "__module__", None) == "scry.eval.candidate"
+        }
+        assert "ServingBlock" in public
+        assert public <= set(scry.eval.__all__)
+        for name in public:
+            assert getattr(scry.eval, name) is getattr(candidate, name)
