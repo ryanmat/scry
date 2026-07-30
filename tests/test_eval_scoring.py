@@ -1,7 +1,7 @@
-# Description: Tests for scry.eval.scoring: keeper windowing and the explicit scoring grids.
-# Description: Pins the validate_incident alias, the lazy exports, and the wall-clock cadence rule.
+# Description: Tests for scry.eval scoring and candidates: keeper windowing, grids, policies.
+# Description: Pins the validate_incident alias, the lazy exports, the cadence rule, and resolution.
 
-"""Tests for the eval scoring primitives.
+"""Tests for the eval scoring primitives, candidates, and threshold policies.
 
 ``windows_for_keeper`` is pinned through the per-resource window-count
 arithmetic on a synthetic capture, the alias identity that keeps
@@ -11,12 +11,19 @@ still leaves torch unimported. ``ScoringGrid`` is pinned through the serving
 preset, identity selection without a cadence, the wall-clock (floored, not
 span-anchored) tick lattice, per-resource per-tick greatest-end selection,
 and single-keep dedup when one window is the greatest for several ticks.
+``ReconstructionCandidate`` is pinned through ScoreSet provenance meta, the
+missing-model contract, the two-grid count divergence, and the empty capture.
+The threshold policies are pinned through per-source resolution, the
+per-resource-split fit half against a pooled-split counterfactual,
+JSON-serializable describe() provenance, and the empty-fit ValueError that
+keeps the dead fallback dead.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -341,3 +348,122 @@ class TestReconstructionCandidate:
         assert score_set.errors.shape == (0,)
         assert len(score_set.end_times) == 0
         assert score_set.resource_ids.shape == (0,)
+
+
+def _policy_score_set(errors: np.ndarray, ends: pd.DatetimeIndex, ids: np.ndarray):
+    # A hand-built ScoreSet for policy tests; meta carries the seq_len=30 /
+    # step=5 the gap convention derives from (ceil(30 / 5) = 6).
+    from scry.eval.candidate import ScoreSet
+    from scry.eval.scoring import ScoringGrid
+
+    return ScoreSet(
+        errors=np.asarray(errors, dtype=np.float64),
+        end_times=ends,
+        resource_ids=np.asarray(ids),
+        grid=ScoringGrid(label="native", step_samples=5),
+        meta={"seq_len": 30, "step": 5},
+    )
+
+
+class TestThresholdPolicies:
+    def test_global_override_resolves_every_resource(self) -> None:
+        from scry.eval.candidate import GlobalOverride
+
+        policy = GlobalOverride(0.25)
+        assert policy.resolve("anything") == (0.25, "override")
+        assert policy.resolve("worker-1") == (0.25, "override")
+        described = policy.describe()
+        assert described["type"] == "GlobalOverride"
+        assert described["threshold"] == 0.25
+
+    def test_reference_quantile_pools_the_full_reference(self) -> None:
+        # Errors increase over time, so an accidental fit/eval split inside the
+        # policy would drag the q99 threshold far below the full-set quantile.
+        from scry.eval.candidate import ReferenceQuantile
+
+        errors = np.arange(1.0, 101.0)
+        ends = pd.date_range("2026-01-01T00:00:00Z", periods=100, freq="5min")
+        ids = np.array(["node-a", "node-b"] * 50)
+        reference = _policy_score_set(errors, ends, ids)
+
+        median = ReferenceQuantile(reference, quantile=0.5)
+        assert median.resolve("node-a") == (50.5, "reference")
+        tail = ReferenceQuantile(reference, quantile=0.99)
+        assert tail.resolve("node-b") == (float(np.quantile(errors, 0.99)), "reference")
+        assert tail.resolve("node-a") == tail.resolve("node-b")
+
+    def test_healthy_split_fits_on_the_per_resource_fit_half(self) -> None:
+        # Drift in each resource's second half, with node-b's span shifted 60
+        # minutes later: a pooled time_split's first-half fit would absorb
+        # node-a's drifted windows (ends 60..85), so only the per-resource
+        # split resolves the all-low fit-half quantile pinned here.
+        from scry.eval.candidate import HealthySplitQuantile
+
+        low_a = np.linspace(0.10, 0.21, 12)
+        high_a = np.linspace(10.0, 11.1, 12)
+        low_b = np.linspace(0.30, 0.41, 12)
+        high_b = np.linspace(20.0, 21.1, 12)
+        base = pd.Timestamp("2026-01-01T00:00:00Z")
+        ends_a = [base + pd.Timedelta(minutes=m * 5) for m in range(24)]
+        ends_b = [base + pd.Timedelta(minutes=60 + m * 5) for m in range(24)]
+        ends = pd.DatetimeIndex(ends_a + ends_b)
+        ids = np.array(["node-a"] * 24 + ["node-b"] * 24)
+        errors = np.concatenate([low_a, high_a, low_b, high_b])
+        scores = _policy_score_set(errors, ends, ids)
+
+        policy = HealthySplitQuantile(scores, quantile=0.99)
+        threshold, source = policy.resolve("node-a")
+        assert source == "healthy_split"
+        fit_expected = np.concatenate([low_a, low_b])
+        assert threshold == float(np.quantile(fit_expected, 0.99))
+        assert threshold != float(np.quantile(errors, 0.99))
+        assert policy.resolve("node-b") == (threshold, "healthy_split")
+
+    def test_describe_is_json_serializable_with_resolved_parameters(self) -> None:
+        from scry.eval.candidate import GlobalOverride, HealthySplitQuantile, ReferenceQuantile
+
+        reference = _policy_score_set(
+            np.linspace(0.1, 0.5, 60),
+            pd.date_range("2026-01-01T00:00:00Z", periods=60, freq="5min"),
+            np.array(["node-a"] * 60),
+        )
+        policies = [
+            GlobalOverride(0.25),
+            ReferenceQuantile(reference, quantile=0.99),
+            HealthySplitQuantile(reference, quantile=0.99),
+        ]
+        for policy in policies:
+            described = policy.describe()
+            json.dumps(described)
+            assert described["type"] == type(policy).__name__
+            assert described["threshold"] == policy.resolve("node-a")[0]
+
+        assert policies[1].describe()["quantile"] == 0.99
+        assert policies[1].describe()["n_reference_windows"] == 60
+        assert policies[1].describe()["grid"] == "native"
+        assert policies[2].describe()["quantile"] == 0.99
+        assert policies[2].describe()["gap"] == 6
+        assert policies[2].describe()["n_fit_windows"] == 30
+        assert policies[2].describe()["grid"] == "native"
+
+    def test_empty_fit_raises_instead_of_falling_back(self) -> None:
+        # The dead empty-fit fallback in healthy_threshold stays dead: an
+        # empty calibration population is an error, never fit-on-everything.
+        from scry.eval.candidate import HealthySplitQuantile, ReferenceQuantile
+
+        empty = _policy_score_set(
+            np.zeros(0), pd.DatetimeIndex([], tz="UTC"), np.array([], dtype=str)
+        )
+        with pytest.raises(ValueError, match="No healthy windows"):
+            ReferenceQuantile(empty, quantile=0.99)
+        with pytest.raises(ValueError, match="No healthy windows"):
+            HealthySplitQuantile(empty, quantile=0.99)
+
+    def test_policy_names_resolve_from_package_root(self) -> None:
+        import scry.eval
+        from scry.eval import candidate
+
+        names = ("ThresholdPolicy", "GlobalOverride", "ReferenceQuantile", "HealthySplitQuantile")
+        for name in names:
+            assert getattr(scry.eval, name) is getattr(candidate, name)
+            assert name in scry.eval.__all__
