@@ -16,7 +16,10 @@ missing-model contract, the two-grid count divergence, and the empty capture.
 The threshold policies are pinned through per-source resolution, the
 per-resource-split fit half against a pooled-split counterfactual,
 JSON-serializable describe() provenance, and the empty-fit ValueError that
-keeps the dead fallback dead.
+keeps the dead fallback dead. ``PerResourceMargin`` is additionally pinned
+bit-identically (float.hex) against the real bake on one calibration, through
+the gated-fleet hygiene fallback routing, the eligibility reasons in
+describe(), and the positive-finite margin guard.
 """
 
 from __future__ import annotations
@@ -28,11 +31,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+import bake_serving_threshold as bake_mod
 import numpy as np
 import pandas as pd
 import pytest
 import validate_incident as vi
-from synth import PROFILE, SEQ_LEN, gen_capture, write_csv
+from synth import PROFILE, SEQ_LEN, gated_fleet_csv, gen_capture, write_csv
 
 from scry.data.fetcher import fetch_full_capture
 from scry.model.checkpoint import load_keeper
@@ -463,7 +467,125 @@ class TestThresholdPolicies:
         import scry.eval
         from scry.eval import candidate
 
-        names = ("ThresholdPolicy", "GlobalOverride", "ReferenceQuantile", "HealthySplitQuantile")
+        names = (
+            "ThresholdPolicy",
+            "GlobalOverride",
+            "ReferenceQuantile",
+            "HealthySplitQuantile",
+            "PerResourceMargin",
+        )
         for name in names:
             assert getattr(scry.eval, name) is getattr(candidate, name)
             assert name in scry.eval.__all__
+
+
+class TestPerResourceMargin:
+    def test_bit_identical_to_the_bake(self, keeper_path: str, fleet_df: pd.DataFrame) -> None:
+        # Same calibration, same quantile, same margin: every policy-resolved
+        # per-resource threshold reproduces the baked map bit for bit
+        # (float.hex). Step 1 keeps both 200-sample nodes over the 50-window
+        # floor, so the map covers the whole fleet.
+        from scry.eval.candidate import PerResourceMargin, ReconstructionCandidate
+        from scry.eval.scoring import ScoringGrid
+
+        keeper = load_keeper(keeper_path)
+        block, _ = bake_mod.compute_serving_block(
+            keeper, fleet_df, quantile=0.99, step=1, per_resource_margin=2.0
+        )
+        assert set(block["per_resource"]) == {"node-a", "node-b"}
+
+        scores = ReconstructionCandidate(keeper_path, profile=PROFILE).score(
+            fleet_df, ScoringGrid(label="native", step_samples=1)
+        )
+        features = {
+            str(rid): set(group["metric_name"].unique())
+            for rid, group in fleet_df.groupby("resource_id")
+        }
+        policy = PerResourceMargin(
+            scores,
+            margin=2.0,
+            fallback=block["threshold"],
+            trained_features=keeper.numerical_features,
+            features_by_resource=features,
+            quantile=0.99,
+        )
+        for rid, baked in block["per_resource"].items():
+            threshold, source = policy.resolve(rid)
+            assert source == "per_resource"
+            assert threshold.hex() == float(baked).hex()
+
+    def test_hygiene_gates_route_to_fallback(self, keeper_path: str, tmp_path: Path) -> None:
+        # The gated fleet: node-a eligible, node-b divergent-coverage, node-c
+        # under the window floor at step 10; a ghost id never scored at all.
+        # Everything but node-a serves the fallback.
+        from scry.eval.candidate import PerResourceMargin, ReconstructionCandidate
+        from scry.eval.scoring import ScoringGrid
+
+        csv = gated_fleet_csv(tmp_path)
+        df_long = asyncio.run(fetch_full_capture(csv, profile=PROFILE))
+        keeper = load_keeper(keeper_path)
+        scores = ReconstructionCandidate(keeper_path, profile=PROFILE).score(
+            df_long, ScoringGrid(label="offline-step10", step_samples=10)
+        )
+        features = {
+            str(rid): set(group["metric_name"].unique())
+            for rid, group in df_long.groupby("resource_id")
+        }
+        policy = PerResourceMargin(
+            scores,
+            margin=2.0,
+            fallback=0.5,
+            trained_features=keeper.numerical_features,
+            features_by_resource=features,
+            quantile=0.99,
+        )
+        own = scores.errors[scores.resource_ids.astype(str) == "node-a"]
+        assert policy.resolve("node-a") == (2.0 * float(np.quantile(own, 0.99)), "per_resource")
+        assert policy.resolve("node-b") == (0.5, "per_resource_fallback")
+        assert policy.resolve("node-c") == (0.5, "per_resource_fallback")
+        assert policy.resolve("node-ghost") == (0.5, "per_resource_fallback")
+
+    def test_describe_carries_map_fallback_and_eligibility(self) -> None:
+        from scry.eval.candidate import PerResourceMargin
+
+        errors = np.concatenate([np.linspace(0.1, 0.3, 60), np.linspace(0.2, 0.4, 12)])
+        ends = pd.date_range("2026-01-01T00:00:00Z", periods=72, freq="5min")
+        ids = np.array(["node-a"] * 60 + ["node-b"] * 12)
+        calibration = _policy_score_set(errors, ends, ids)
+        policy = PerResourceMargin(
+            calibration,
+            margin=2.0,
+            fallback=0.5,
+            trained_features=("cpu",),
+            features_by_resource={"node-a": {"cpu"}, "node-b": {"cpu"}},
+            quantile=0.99,
+        )
+        described = policy.describe()
+        json.dumps(described)
+        assert described["type"] == "PerResourceMargin"
+        assert described["margin"] == 2.0
+        assert described["quantile"] == 0.99
+        assert described["fallback"] == 0.5
+        assert set(described["per_resource"]) == {"node-a"}
+        assert described["per_resource"]["node-a"] == policy.resolve("node-a")[0]
+        assert described["eligibility"]["node-a"] == []
+        assert described["eligibility"]["node-b"] == ["insufficient-windows:12<50"]
+        assert described["grid"] == "native"
+
+    def test_invalid_margin_raises(self) -> None:
+        from scry.eval.candidate import PerResourceMargin
+
+        calibration = _policy_score_set(
+            np.linspace(0.1, 0.3, 60),
+            pd.date_range("2026-01-01T00:00:00Z", periods=60, freq="5min"),
+            np.array(["node-a"] * 60),
+        )
+        for bad in (0.0, -1.0, float("nan"), float("inf")):
+            with pytest.raises(ValueError, match="margin must be a positive finite number"):
+                PerResourceMargin(
+                    calibration,
+                    margin=bad,
+                    fallback=0.5,
+                    trained_features=("cpu",),
+                    features_by_resource={"node-a": {"cpu"}},
+                )

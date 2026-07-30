@@ -15,15 +15,20 @@ A ``ThresholdPolicy`` resolves the anomaly threshold a resource is scored
 against, as ``(threshold, source)``. ``GlobalOverride`` states one number,
 ``ReferenceQuantile`` fits the pooled quantile of a separate healthy reference
 ScoreSet (no split; the capture under evaluation is disjoint from the
-reference), and ``HealthySplitQuantile`` fits on the pooled fit halves of the
-per-resource time split, holding the eval halves out. An empty fit population
-raises ValueError; no policy falls back to fitting on everything.
+reference), ``HealthySplitQuantile`` fits on the pooled fit halves of the
+per-resource time split, holding the eval halves out, and
+``PerResourceMargin`` bakes margin-times-own-quantile per resource behind the
+hygiene gates, falling back to a global threshold for ineligible and unknown
+resources. The quantile-fit policies raise ValueError on an empty fit
+population; none falls back to fitting on everything.
 """
 
 from __future__ import annotations
 
 import hashlib
+import math
 from abc import ABC, abstractmethod
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,6 +37,7 @@ import numpy as np
 import pandas as pd
 
 from scry.data.feature_engineering import set_active_profile
+from scry.eval.hygiene import per_resource_eligibility
 from scry.eval.scoring import ScoringGrid, per_resource_time_split, windows_for_keeper
 from scry.model.checkpoint import load_keeper
 from scry.model.reconstruction import reconstruction_errors
@@ -214,5 +220,78 @@ class HealthySplitQuantile(ThresholdPolicy):
             "gap": self._gap,
             "n_fit_windows": self._n_fit_windows,
             "n_eval_windows": self._n_eval_windows,
+            "grid": self._grid_label,
+        }
+
+
+class PerResourceMargin(ThresholdPolicy):
+    """Margin times own-quantile per resource; source ``"per_resource"`` or
+    ``"per_resource_fallback"``.
+
+    Mirrors the bake's per-resource arithmetic: pooled windows sliced by
+    resource, no holdout split, the margin carrying the cross-day drift
+    headroom -- so resolving on the calibration that fed the bake reproduces
+    the baked ``per_resource`` map bit-identically. The ``scry.eval.hygiene``
+    gates decide eligibility; an ineligible or unknown resource resolves the
+    global fallback. Gate verdicts land in ``describe()`` rather than on
+    stderr (the bake's CLI concern).
+
+    Args:
+        calibration: ScoreSet of an all-healthy calibration capture.
+        margin: Multiplier on each resource's own healthy quantile.
+        fallback: Global threshold served to ineligible and unknown resources.
+        trained_features: The keeper's trained numerical feature names.
+        features_by_resource: Per-resource metric_name sets from the
+            calibration capture, keyed by stringified resource id.
+        quantile: Healthy quantile taken per resource.
+
+    Raises:
+        ValueError: If ``margin`` is not a positive finite number.
+    """
+
+    def __init__(
+        self,
+        calibration: ScoreSet,
+        *,
+        margin: float,
+        fallback: float,
+        trained_features: Sequence[str],
+        features_by_resource: Mapping[str, set[str]],
+        quantile: float = 0.99,
+    ):
+        if not math.isfinite(margin) or margin <= 0:
+            raise ValueError("margin must be a positive finite number")
+        eligibility = per_resource_eligibility(
+            trained_features=trained_features,
+            features_by_resource=features_by_resource,
+            resource_ids=calibration.resource_ids,
+            errors=calibration.errors,
+            quantile=quantile,
+        )
+        per_resource: dict[str, float] = {}
+        for rid, verdict in eligibility.items():
+            if verdict.eligible:
+                per_resource[rid] = margin * verdict.own_quantile
+        self._margin = margin
+        self._quantile = quantile
+        self._fallback = float(fallback)
+        self._per_resource = per_resource
+        self._eligibility = {rid: list(v.reasons) for rid, v in eligibility.items()}
+        self._grid_label = calibration.grid.label
+
+    def resolve(self, resource_id: str) -> tuple[float, str]:
+        threshold = self._per_resource.get(resource_id)
+        if threshold is None:
+            return self._fallback, "per_resource_fallback"
+        return threshold, "per_resource"
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            "type": "PerResourceMargin",
+            "margin": self._margin,
+            "quantile": self._quantile,
+            "fallback": self._fallback,
+            "per_resource": dict(self._per_resource),
+            "eligibility": {rid: list(reasons) for rid, reasons in self._eligibility.items()},
             "grid": self._grid_label,
         }

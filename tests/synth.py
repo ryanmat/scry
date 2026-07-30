@@ -84,6 +84,21 @@ def write_csv(df: pd.DataFrame, path: Path) -> str:
     return str(path)
 
 
+def gated_fleet_csv(tmp_path: Path) -> str:
+    """Three resources: eligible, divergent-coverage, and under the window floor.
+
+    node-a is clean (58 windows at step 10). node-b drops cpuUsageNanoCores,
+    which the capture supplies elsewhere (gate 1). node-c has 140 samples, so
+    exactly 12 windows (gate 2).
+    """
+    df_a, _ = gen_capture("node-a", 600, seed=51)
+    df_b, _ = gen_capture("node-b", 600, seed=52)
+    df_b = df_b[df_b["metric_name"] != "cpuUsageNanoCores"]
+    df_c, _ = gen_capture("node-c", 140, seed=53)
+    fleet = pd.concat([df_a, df_b, df_c], ignore_index=True)
+    return write_csv(fleet, tmp_path / "gated_fleet.csv")
+
+
 def write_labels(path: Path, entries: list[dict[str, str]]) -> str:
     """Write a labels JSON from a list of incident entries and return its path."""
     path.write_text(json.dumps(entries))
