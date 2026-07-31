@@ -14,21 +14,37 @@ the same ``fetch_full_capture`` loader the cases use), a rubric that passes
 healthy_reference (takes no labels). Spec errors are COLLECTED and raised
 together as one SpecError naming every problem, the exit-2 signal.
 ``load_capture`` is the one loader for case captures and policy calibrations.
-Importing this module never pulls torch; the candidate stack is imported
-lazily by the orchestration layer.
+
+``run_suite`` orchestrates a run: grids built from the rubric's declarations
+(labeled by grid name), every case scored on every grid, the threshold
+policy resolved per resource (the calibration scored on the headline grid;
+healthy_split fits per case), one CaseMetrics per case with the context
+conduit filled, and the rubric evaluated exactly once per case. Importing
+this module never pulls torch; the candidate and model stacks are imported
+lazily inside the orchestration functions.
 """
 
 from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import pandas as pd
 import yaml
 
 from scry.data.fetcher import fetch_full_capture
-from scry.eval.rubric import SpecError, load_rubric
+from scry.eval.detection import SUSTAIN_DEFAULT
+from scry.eval.hygiene import per_resource_eligibility
+from scry.eval.labels import LabelSet, load_labels
+from scry.eval.metrics import compute_case_metrics
+from scry.eval.rubric import SpecError, evaluate_rubric, load_rubric
+
+if TYPE_CHECKING:
+    from scry.eval.candidate import ScoreSet, ThresholdPolicy
+    from scry.eval.scoring import ScoringGrid
+    from scry.model.checkpoint import Keeper
 
 POLICY_TYPES: tuple[str, ...] = (
     "global_override",
@@ -180,3 +196,226 @@ def load_suite(path: str) -> dict[str, Any]:
     if problems:
         raise SpecError(f"suite {path} is unevaluable: " + "; ".join(problems))
     return suite
+
+
+def _grids_from_rubric(rubric: dict[str, Any]) -> dict[str, ScoringGrid]:
+    """ScoringGrid instances from the rubric's grids block, labeled by grid name."""
+    from scry.eval.scoring import ScoringGrid  # imports the model stack; keep lazy
+
+    grids: dict[str, ScoringGrid] = {}
+    for name, declared in rubric["grids"].items():
+        cadence = declared.get("cadence_minutes")
+        grids[name] = ScoringGrid(
+            label=name,
+            step_samples=int(declared["step_samples"]),
+            cadence=pd.Timedelta(minutes=cadence) if cadence is not None else None,
+        )
+    return grids
+
+
+def _features_by_resource(df_long: pd.DataFrame) -> dict[str, set[str]]:
+    return {
+        str(rid): set(group["metric_name"].unique())
+        for rid, group in df_long.groupby("resource_id")
+    }
+
+
+def _build_policy(
+    policy_cfg: dict[str, Any],
+    model_path: str,
+    keeper: Keeper,
+    calibration_df: pd.DataFrame | None,
+    calibration_scores: ScoreSet | None,
+) -> ThresholdPolicy | None:
+    """The suite's threshold policy; None for healthy_split (built per case)."""
+    from scry.eval.candidate import (
+        GlobalOverride,
+        PerResourceMargin,
+        ReferenceQuantile,
+        ServingBlock,
+    )
+
+    policy_type = policy_cfg["type"]
+    quantile = float(policy_cfg.get("quantile", 0.99))
+    if policy_type == "global_override":
+        threshold = policy_cfg.get("threshold")
+        if threshold is None:
+            raise SpecError("threshold_policy type 'global_override' requires 'threshold'")
+        return GlobalOverride(float(threshold))
+    if policy_type == "serving_block":
+        return ServingBlock(model_path)
+    if policy_type == "reference_quantile":
+        return ReferenceQuantile(calibration_scores, quantile)
+    if policy_type == "per_resource_margin":
+        # The global fallback for ineligible and unknown resources is the
+        # pooled calibration quantile, the harness's own global convention.
+        return PerResourceMargin(
+            calibration_scores,
+            margin=float(policy_cfg["margin"]),
+            fallback=float(np.quantile(np.asarray(calibration_scores.errors), quantile)),
+            trained_features=keeper.numerical_features,
+            features_by_resource=_features_by_resource(calibration_df),
+            quantile=quantile,
+        )
+    return None  # healthy_split fits on each case's own capture
+
+
+def _hygiene_context(
+    population: str,
+    keeper: Keeper,
+    features_by_resource: dict[str, set[str]],
+    scores: ScoreSet,
+    quantile: float,
+) -> dict[str, Any]:
+    verdicts = per_resource_eligibility(
+        trained_features=keeper.numerical_features,
+        features_by_resource=features_by_resource,
+        resource_ids=np.asarray(scores.resource_ids),
+        errors=np.asarray(scores.errors),
+        quantile=quantile,
+    )
+    return {
+        "hygiene_population": population,
+        "eligibility": {rid: list(verdict.reasons) for rid, verdict in verdicts.items()},
+    }
+
+
+def run_suite(suite: dict[str, Any] | str, case_names: list[str] | None = None) -> dict[str, Any]:
+    """Run every case of a suite: score, resolve thresholds, bundle, evaluate.
+
+    Each case is scored on every rubric-declared grid (grid labels are the
+    rubric's grid names), the threshold policy resolves per resource, one
+    CaseMetrics is produced per case with the context conduit filled (hygiene
+    population per the 8.3 rule: the policy's calibration population where it
+    has one, else the case's pre-onset slice for incident cases and the whole
+    capture for healthy ones; keeper profile; labelled resources present),
+    and the rubric is evaluated exactly once per case. The calibration is
+    scored on the headline grid, the declared reading convention.
+
+    Args:
+        suite: A validated suite mapping from ``load_suite``, or a path.
+        case_names: Optional case-name filter; unknown names are a SpecError.
+
+    Returns:
+        Dict with the suite name, the rubric version, and one entry per case
+        carrying its name, kind, CaseMetrics, and RubricResult.
+
+    Raises:
+        SpecError: On unknown case names or a policy missing its parameters.
+    """
+    from scry.eval.candidate import HealthySplitQuantile, ReconstructionCandidate
+    from scry.model.checkpoint import load_keeper
+
+    if isinstance(suite, str):
+        suite = load_suite(suite)
+    rubric = load_rubric(suite["rubric"])
+    detection_cfg = rubric.get("detection") or {}
+    mode = detection_cfg.get("mode", "no_bridging")
+    onset_anchor = detection_cfg.get("onset_anchor", "T0")
+    sustain = int(detection_cfg.get("sustain", SUSTAIN_DEFAULT))
+    lead_in = pd.Timedelta(hours=float(detection_cfg.get("lead_in_hours", 24)))
+    max_leadtime = pd.Timedelta(minutes=float(detection_cfg.get("max_leadtime_minutes", 120)))
+    grids = _grids_from_rubric(rubric)
+    headline = rubric["headline_grid"]
+
+    candidate_cfg = suite["candidate"]
+    profile = candidate_cfg["profile"]
+    model_path = candidate_cfg["model"]
+    candidate = ReconstructionCandidate(model_path, profile=profile)
+    keeper = load_keeper(model_path)
+    quantile = float(suite["threshold_policy"].get("quantile", 0.99))
+
+    policy_cfg = suite["threshold_policy"]
+    calibration_df = None
+    calibration_scores = None
+    calibration_context = None
+    if policy_cfg.get("calibration"):
+        calibration_df = load_capture(policy_cfg["calibration"], profile, policy_cfg.get("format"))
+        calibration_scores = candidate.score(calibration_df, grids[headline])
+        calibration_context = _hygiene_context(
+            "calibration",
+            keeper,
+            _features_by_resource(calibration_df),
+            calibration_scores,
+            quantile,
+        )
+    policy = _build_policy(policy_cfg, model_path, keeper, calibration_df, calibration_scores)
+
+    cases = suite["cases"]
+    if case_names is not None:
+        known = {case["name"] for case in cases}
+        unknown = sorted(set(case_names) - known)
+        if unknown:
+            raise SpecError(f"unknown case name(s): {', '.join(unknown)}")
+        cases = [case for case in cases if case["name"] in case_names]
+
+    results: list[dict[str, Any]] = []
+    for case in cases:
+        df_long = load_capture(case["capture"], profile, case.get("format"))
+        if case["kind"] == "incident_capture":
+            labels = load_labels(case["labels"])
+        else:
+            labels = LabelSet(version=2, capture=None, cases=[])
+        scores_by_grid = {name: candidate.score(df_long, grid) for name, grid in grids.items()}
+
+        case_policy = policy
+        if case_policy is None:
+            case_policy = HealthySplitQuantile(scores_by_grid[headline], quantile)
+
+        scored_ids = sorted(
+            {str(rid) for scores in scores_by_grid.values() for rid in scores.resource_ids}
+        )
+        thresholds = {rid: case_policy.resolve(rid) for rid in scored_ids}
+
+        if calibration_context is not None:
+            context = dict(calibration_context)
+        else:
+            headline_scores = scores_by_grid[headline]
+            ends = headline_scores.end_times
+            incidents = labels.incidents()
+            if incidents:
+                primary = min(incident.onsets[incident.primary_onset] for incident in incidents)
+                mask = (ends >= primary - lead_in) & (ends < primary)
+                population = "pre_onset"
+            else:
+                mask = np.ones(len(ends), dtype=bool)
+                population = "capture"
+            sliced = type(headline_scores)(
+                errors=np.asarray(headline_scores.errors)[mask],
+                end_times=ends[mask],
+                resource_ids=np.asarray(headline_scores.resource_ids)[mask],
+                grid=headline_scores.grid,
+                meta=dict(headline_scores.meta),
+            )
+            context = _hygiene_context(
+                population, keeper, _features_by_resource(df_long), sliced, quantile
+            )
+        context["profile"] = keeper.profile or profile
+        context["labels_resources_present"] = {
+            label_case.resource_id: label_case.resource_id in scored_ids
+            for label_case in labels.cases
+        }
+
+        metrics = compute_case_metrics(
+            case["name"],
+            scores_by_grid,
+            labels,
+            thresholds,
+            mode=mode,
+            onset_anchor=onset_anchor,
+            sustain=sustain,
+            lead_in=lead_in,
+            max_leadtime=max_leadtime,
+            context=context,
+        )
+        rubric_result = evaluate_rubric(rubric, metrics)
+        results.append(
+            {
+                "name": case["name"],
+                "kind": metrics.case_kind,
+                "metrics": metrics,
+                "rubric_result": rubric_result,
+            }
+        )
+
+    return {"suite": suite["suite"], "rubric_version": int(rubric["version"]), "cases": results}
