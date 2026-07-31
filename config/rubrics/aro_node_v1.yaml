@@ -1,0 +1,72 @@
+# Description: Versioned pass criteria (rubric v1) for the aro_node evaluation harness.
+# Description: A rubric is data; scry.eval.rubric loads it and evaluates gates against metric bundles.
+
+version: 1
+profile: aro_node
+
+detection:
+  mode: no_bridging          # validate_incident's legacy default stays lookback
+  onset_anchor: T0
+  sustain: 3
+  max_leadtime_minutes: 120
+  lead_in_hours: 24          # chosen from phase-4 measurements: 24h gives a
+                             # well-powered lead-in where 6h was underpowered
+
+grids:
+  offline: {step_samples: 10}
+  serving: {step_samples: 1, cadence_minutes: 10}
+headline_grid: serving       # reading convention declared before the phase-4
+                             # capture existed
+
+# Each gate: required plus optional allow_absent, grid, and parameters. A gate
+# evaluates on headline_grid unless it declares its own grid.
+gates:
+  no_pre_onset_bridging: {required: true}
+  detection_lead:
+    required: true
+    min_lead_vs: T2
+    min_lead_seconds: 0      # any positive lead vs the reference alarm onset
+  lead_in_fpr:
+    required: true
+    max_fraction: 0.02
+    min_eval_windows: 150    # a gate on an underpowered lead-in is vacuous
+  alarm_fatigue:             # evaluated on healthy-reference cases, deployed config
+    required: true
+    grid: serving
+    sustain: 1
+    max_time_in_alarm_fraction_per_resource: 0.05   # v1 default, owner-tunable
+    max_fleet_raises_per_week: 10                   # v1 default, owner-tunable
+  negative_controls_clean:
+    required: true           # zero sustained runs on control resources at their
+                             # own resolved thresholds
+  coverage_integrity:
+    required: true           # every non-excluded resource passes hygiene with
+                             # empty reasons
+  sanity:
+    required: true           # thresholds finite and positive, bundle numbers
+                             # finite, keeper profile matches, windows present,
+                             # labelled resources present in the capture
+
+reported:                    # never gate
+  vus_pr: {}
+  incident_coverage: {}
+  deployed_config_accounting: {grid: serving, sustain: 1}
+
+known_divergences:
+  - "serving is sustain-1 single-window scoring (src/scry/api/predictor.py; the
+     LM alertTransitionInterval is 0) while offline gates use sustain-3;
+     deployed-config numbers are reported alongside every sustain-3 number."
+  - "deployments predating the POST parity fix resolve only the global threshold
+     on POST /anomaly/reconstruction while /anomaly/reconstruction/lookup honors
+     the per-resource map; current src/scry/api resolves both identically."
+  - "SCRY_RECON_THRESHOLD, when set and valid, disables the per-resource map
+     entirely: env override beats per-resource beats global
+     (src/scry/api/predictor.py)."
+  - "scripts/bake_serving_threshold.py keeps the pooled time_split gap; the
+     harness threshold policies use the per-resource split. No shipped threshold
+     moves (the fit half is gap-independent)."
+  - "the serving grid advances on the ~10-minute serving-window refresh while
+     the collector polls every 5 minutes, so alternate polls score identical
+     windows."
+  - "/anomaly/reconstruction/lookup scores the resolved canonical id but echoes
+     the caller's raw query string (src/scry/api/main.py)."
