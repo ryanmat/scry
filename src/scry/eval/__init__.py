@@ -42,6 +42,7 @@ from scry.eval.metrics import (
     ResourceMetrics,
     compute_case_metrics,
 )
+from scry.eval.provenance import build_provenance
 from scry.eval.rubric import (
     GateResult,
     RubricResult,
@@ -115,6 +116,7 @@ __all__ = [
     "SpecError",
     "ThresholdPolicy",
     "anomaly_runs",
+    "build_provenance",
     "compute_case_metrics",
     "dump_labels",
     "evaluate_rubric",
