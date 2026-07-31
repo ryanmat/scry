@@ -17,6 +17,17 @@ incident-requires-labels and healthy-takes-none rules, the collected
 one-SpecError report naming every problem at once, the calibration loading
 through the one fetch_full_capture loader with the case-style format key, and
 the rubric-validation propagation; ``scry.eval.suite`` imports torch-free.
+``run_suite`` is pinned end to end on the tiny keeper: one serialized case
+entry per case on every rubric-declared grid, per-resource policy resolution
+with controls populated inside the incident case, the context conduit under
+each case's reported block (never in per_resource), the ramp fixture passing
+the detection gates and the pinned alarm failing alarm_fatigue, the rubric
+evaluated exactly once per case, case-name filtering, and the lazy package
+export. The report is pinned through its top-level shape and both verdicts,
+the exact 9.3 grid and 20-field per-resource key sets, sustain fields as
+string-keyed objects with both accountings always present (empty dicts as
+nulls), the validator rejecting a stripped accounting, JSON
+serializability, and determinism modulo generated_at.
 """
 
 from __future__ import annotations
@@ -401,50 +412,75 @@ def run_result(keeper_path: str, tmp_path_factory: pytest.TempPathFactory) -> di
     return result
 
 
+_RESOURCE_FIELDS = (
+    "resource_id",
+    "role",
+    "threshold",
+    "threshold_source",
+    "n_eval_windows",
+    "detection",
+    "detection_time",
+    "lead_seconds_by_onset",
+    "lead_in_fpr",
+    "n_lead_in_windows",
+    "coverage_fraction",
+    "clear_lead_vs_end_s",
+    "alarm_seconds_in_incident",
+    "time_in_alarm_fraction",
+    "raises_per_week",
+    "runs_per_week",
+    "sustained_run_counts",
+    "observed_span_days",
+    "slice_stats_by_threshold",
+    "exceedances_by_threshold",
+)
+
+
 class TestRunSuite:
-    def test_one_case_metrics_per_case_on_every_declared_grid(self, run_result: dict) -> None:
+    def test_one_case_entry_per_case_on_every_declared_grid(self, run_result: dict) -> None:
         assert [case["name"] for case in run_result["cases"]] == ["ramp_incident", "pinned_alarm"]
         incident, healthy = run_result["cases"]
         assert incident["kind"] == "incident"
         assert healthy["kind"] == "healthy_reference"
         for case in (incident, healthy):
-            assert set(case["metrics"].grids) == {"offline", "serving"}
-            for label, grid_metrics in case["metrics"].grids.items():
-                assert grid_metrics.grid.label == label
+            assert set(case["grids"]) == {"offline", "serving"}
+            for label, grid in case["grids"].items():
+                assert grid["grid"]["label"] == label
 
     def test_policy_resolved_per_resource_and_controls_populated(self, run_result: dict) -> None:
-        incident = run_result["cases"][0]["metrics"]
-        grid = incident.grids["serving"]
-        assert set(grid.per_resource) == {"node-a", "node-ctl"}
-        assert grid.per_resource["node-a"].role == "incident"
-        assert grid.per_resource["node-a"].threshold_source == "per_resource"
-        control = grid.per_resource["node-ctl"]
-        assert control.role == "negative_control"
-        assert set(control.slice_stats_by_threshold) == {"own", "node-a"}
+        grid = run_result["cases"][0]["grids"]["serving"]
+        assert set(grid["per_resource"]) == {"node-a", "node-ctl"}
+        assert grid["per_resource"]["node-a"]["role"] == "incident"
+        assert grid["per_resource"]["node-a"]["threshold_source"] == "per_resource"
+        control = grid["per_resource"]["node-ctl"]
+        assert control["role"] == "negative_control"
+        assert set(control["slice_stats_by_threshold"]) == {"own", "node-a"}
 
-    def test_context_conduit_filled(self, run_result: dict) -> None:
-        incident = run_result["cases"][0]["metrics"]
-        assert incident.context["hygiene_population"] == "calibration"
-        assert incident.context["profile"] == PROFILE
-        assert incident.context["labels_resources_present"] == {
-            "node-a": True,
-            "node-ctl": True,
-        }
-        eligibility = incident.context["eligibility"]
+    def test_context_conduit_serializes_under_reported(self, run_result: dict) -> None:
+        reported = run_result["cases"][0]["reported"]
+        assert reported["hygiene_population"] == "calibration"
+        assert reported["profile"] == PROFILE
+        assert reported["labels_resources_present"] == {"node-a": True, "node-ctl": True}
+        eligibility = reported["eligibility"]
         assert {"node-a", "node-ctl", "node-hot"} <= set(eligibility)
         assert eligibility["node-a"] == []
+        # The conduit never leaks into per_resource: its enumeration stays closed.
+        for grid in run_result["cases"][0]["grids"].values():
+            for resource in grid["per_resource"].values():
+                assert set(resource) == set(_RESOURCE_FIELDS)
 
     def test_ramp_passes_detection_gates(self, run_result: dict) -> None:
-        gates = {gate.name: gate for gate in run_result["cases"][0]["rubric_result"].gates}
-        assert gates["no_pre_onset_bridging"].passed is True
-        assert gates["detection_lead"].passed is True
-        assert gates["detection_lead"].observed["lead_seconds"]["node-a"] > 0
+        gates = {gate["name"]: gate for gate in run_result["cases"][0]["rubric"]["gates"]}
+        assert gates["no_pre_onset_bridging"]["passed"] is True
+        assert gates["detection_lead"]["passed"] is True
+        assert gates["detection_lead"]["observed"]["lead_seconds"]["node-a"] > 0
+        assert gates["detection_lead"]["grid"] == "serving"
 
     def test_pinned_alarm_fails_alarm_fatigue(self, run_result: dict) -> None:
         healthy = run_result["cases"][1]
-        gates = {gate.name: gate for gate in healthy["rubric_result"].gates}
-        assert gates["alarm_fatigue"].passed is False
-        assert healthy["rubric_result"].passed is False
+        gates = {gate["name"]: gate for gate in healthy["rubric"]["gates"]}
+        assert gates["alarm_fatigue"]["passed"] is False
+        assert healthy["rubric"]["passed"] is False
 
     def test_rubric_evaluated_once_per_case(
         self, keeper_path: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -477,6 +513,100 @@ class TestRunSuite:
         assert "run_suite" not in vars(scry.eval)  # lazy, not eager
         assert scry.eval.run_suite is run_suite
         assert "run_suite" in scry.eval.__all__
+
+
+class TestReport:
+    def test_top_level_shape_and_fail_verdict(self, run_result: dict) -> None:
+        assert set(run_result) == {"provenance", "suite", "cases", "verdict", "exit_code"}
+        assert run_result["suite"] == "run_suite"
+        assert run_result["verdict"] == "FAIL"  # the pinned alarm fails a required gate
+        assert run_result["exit_code"] == 1
+        provenance = run_result["provenance"]
+        assert re.fullmatch(r"[0-9a-f]{64}", provenance["model_sha256"])
+        assert set(provenance["grids"]) == {"offline", "serving"}
+        assert provenance["threshold_policy"]["type"] == "PerResourceMargin"
+        assert set(provenance["cases"]) == {"ramp_incident", "pinned_alarm"}
+        for case in run_result["cases"]:
+            assert set(case) == {"name", "kind", "grids", "rubric", "reported"}
+            for gate in case["rubric"]["gates"]:
+                assert set(gate) == {"name", "required", "passed", "grid", "observed", "detail"}
+
+    def test_pass_verdict_and_exit_zero(self, keeper_path: str, tmp_path: Path) -> None:
+        suite_path = _write_run_suite_tree(tmp_path, keeper_path)
+        report = run_suite(load_suite(suite_path), case_names=["ramp_incident"])
+        assert report["verdict"] == "PASS"
+        assert report["exit_code"] == 0
+
+    def test_grid_serialization_carries_exactly_the_schema_keys(self, run_result: dict) -> None:
+        grid = run_result["cases"][0]["grids"]["serving"]
+        assert set(grid) == {
+            "grid",
+            "per_resource",
+            "pooled_lead_in_fpr",
+            "fleet_time_in_alarm_fraction",
+            "fleet_raises_per_week",
+            "fleet_runs_per_week",
+            "n_eval_windows",
+            "vus_pr",
+        }
+        assert set(grid["grid"]) == {"label", "step_samples", "cadence_seconds"}
+        assert grid["grid"] == {"label": "serving", "step_samples": 1, "cadence_seconds": 600.0}
+        resource = grid["per_resource"]["node-a"]
+        assert set(resource) == set(_RESOURCE_FIELDS)
+        assert set(resource["detection"]) == {
+            "detected",
+            "detection_time",
+            "lead_seconds",
+            "bridged",
+            "n_runs_pre_onset",
+            "n_runs_at_or_after",
+        }
+        assert resource["detection_time"].endswith("Z")
+
+    def test_sustain_fields_serialize_with_both_string_keys(self, run_result: dict) -> None:
+        for case in run_result["cases"]:
+            for grid in case["grids"].values():
+                for field_name in (
+                    "pooled_lead_in_fpr",
+                    "fleet_time_in_alarm_fraction",
+                    "fleet_raises_per_week",
+                    "fleet_runs_per_week",
+                ):
+                    assert set(grid[field_name]) == {"3", "1"}
+                for resource in grid["per_resource"].values():
+                    for field_name in (
+                        "lead_in_fpr",
+                        "time_in_alarm_fraction",
+                        "raises_per_week",
+                        "runs_per_week",
+                        "sustained_run_counts",
+                    ):
+                        assert set(resource[field_name]) == {"3", "1"}
+        # A role-neutral empty dict still serializes with both keys, as nulls.
+        incident_resource = run_result["cases"][0]["grids"]["serving"]["per_resource"]["node-a"]
+        assert incident_resource["time_in_alarm_fraction"] == {"3": None, "1": None}
+
+    def test_validator_rejects_a_stripped_accounting(self, run_result: dict) -> None:
+        from copy import deepcopy
+
+        from scry.eval.suite import validate_report
+
+        validate_report(run_result)
+        stripped = deepcopy(run_result)
+        del stripped["cases"][0]["grids"]["serving"]["per_resource"]["node-a"]["lead_in_fpr"]["3"]
+        with pytest.raises(SpecError, match="lead_in_fpr"):
+            validate_report(stripped)
+
+    def test_report_is_json_serializable(self, run_result: dict) -> None:
+        json.dumps(run_result)
+
+    def test_determinism_modulo_generated_at(self, keeper_path: str, tmp_path: Path) -> None:
+        suite_path = _write_run_suite_tree(tmp_path, keeper_path)
+        first = json.loads(json.dumps(run_suite(load_suite(suite_path))))
+        second = json.loads(json.dumps(run_suite(load_suite(suite_path))))
+        first["provenance"].pop("generated_at")
+        second["provenance"].pop("generated_at")
+        assert first == second
 
 
 class TestTorchFreeImport:

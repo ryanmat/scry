@@ -19,9 +19,13 @@ together as one SpecError naming every problem, the exit-2 signal.
 (labeled by grid name), every case scored on every grid, the threshold
 policy resolved per resource (the calibration scored on the headline grid;
 healthy_split fits per case), one CaseMetrics per case with the context
-conduit filled, and the rubric evaluated exactly once per case. Importing
-this module never pulls torch; the candidate and model stacks are imported
-lazily inside the orchestration functions.
+conduit filled, and the rubric evaluated exactly once per case. It returns
+the full report -- provenance, serialized cases with the conduit under each
+case's ``reported`` block, the PASS/FAIL verdict, and the exit code --
+validated against the schema enumeration by ``validate_report``, with every
+sustain-keyed field carrying both string-keyed accountings. Importing this
+module never pulls torch; the candidate and model stacks are imported lazily
+inside the orchestration functions.
 """
 
 from __future__ import annotations
@@ -35,11 +39,18 @@ import pandas as pd
 import yaml
 
 from scry.data.fetcher import fetch_full_capture
-from scry.eval.detection import SUSTAIN_DEFAULT
+from scry.eval.detection import SUSTAIN_DEFAULT, DetectionResult
 from scry.eval.hygiene import per_resource_eligibility
 from scry.eval.labels import LabelSet, load_labels
-from scry.eval.metrics import compute_case_metrics
-from scry.eval.rubric import SpecError, evaluate_rubric, load_rubric
+from scry.eval.metrics import (
+    SUSTAIN_ACCOUNTINGS,
+    CaseMetrics,
+    GridMetrics,
+    ResourceMetrics,
+    compute_case_metrics,
+)
+from scry.eval.provenance import build_provenance
+from scry.eval.rubric import RubricResult, SpecError, evaluate_rubric, load_rubric
 
 if TYPE_CHECKING:
     from scry.eval.candidate import ScoreSet, ThresholdPolicy
@@ -280,6 +291,194 @@ def _hygiene_context(
     }
 
 
+# The 9.3 report enumeration: serialized field sets, exact and closed.
+_RESOURCE_FIELDS: tuple[str, ...] = (
+    "resource_id",
+    "role",
+    "threshold",
+    "threshold_source",
+    "n_eval_windows",
+    "detection",
+    "detection_time",
+    "lead_seconds_by_onset",
+    "lead_in_fpr",
+    "n_lead_in_windows",
+    "coverage_fraction",
+    "clear_lead_vs_end_s",
+    "alarm_seconds_in_incident",
+    "time_in_alarm_fraction",
+    "raises_per_week",
+    "runs_per_week",
+    "sustained_run_counts",
+    "observed_span_days",
+    "slice_stats_by_threshold",
+    "exceedances_by_threshold",
+)
+_RESOURCE_SUSTAIN_FIELDS: tuple[str, ...] = (
+    "lead_in_fpr",
+    "time_in_alarm_fraction",
+    "raises_per_week",
+    "runs_per_week",
+    "sustained_run_counts",
+)
+_GRID_FIELDS: tuple[str, ...] = (
+    "grid",
+    "per_resource",
+    "pooled_lead_in_fpr",
+    "fleet_time_in_alarm_fraction",
+    "fleet_raises_per_week",
+    "fleet_runs_per_week",
+    "n_eval_windows",
+    "vus_pr",
+)
+_GRID_SUSTAIN_FIELDS: tuple[str, ...] = (
+    "pooled_lead_in_fpr",
+    "fleet_time_in_alarm_fraction",
+    "fleet_raises_per_week",
+    "fleet_runs_per_week",
+)
+_CASE_ENTRY_FIELDS: tuple[str, ...] = ("name", "kind", "grids", "rubric", "reported")
+_GATE_FIELDS: tuple[str, ...] = ("name", "required", "passed", "grid", "observed", "detail")
+
+
+def _iso_or_none(ts: pd.Timestamp | None) -> str | None:
+    return ts.isoformat().replace("+00:00", "Z") if ts is not None else None
+
+
+def _sustain_object(values: dict[int, Any]) -> dict[str, Any]:
+    """Sustain-keyed dict as a string-keyed object with both accountings always
+    present; a role-neutral empty dict serializes as nulls under both keys."""
+    return {str(sustain): values.get(sustain) for sustain in SUSTAIN_ACCOUNTINGS}
+
+
+def _serialize_detection(detection: DetectionResult | None) -> dict[str, Any] | None:
+    if detection is None:
+        return None
+    return {
+        "detected": detection.detected,
+        "detection_time": _iso_or_none(detection.detection_time),
+        "lead_seconds": detection.lead_seconds,
+        "bridged": detection.bridged,
+        "n_runs_pre_onset": detection.n_runs_pre_onset,
+        "n_runs_at_or_after": detection.n_runs_at_or_after,
+    }
+
+
+def _serialize_resource(resource: ResourceMetrics) -> dict[str, Any]:
+    serialized = {
+        "resource_id": resource.resource_id,
+        "role": resource.role,
+        "threshold": resource.threshold,
+        "threshold_source": resource.threshold_source,
+        "n_eval_windows": resource.n_eval_windows,
+        "detection": _serialize_detection(resource.detection),
+        "detection_time": _iso_or_none(resource.detection_time),
+        "lead_seconds_by_onset": dict(resource.lead_seconds_by_onset),
+        "n_lead_in_windows": resource.n_lead_in_windows,
+        "coverage_fraction": resource.coverage_fraction,
+        "clear_lead_vs_end_s": resource.clear_lead_vs_end_s,
+        "alarm_seconds_in_incident": resource.alarm_seconds_in_incident,
+        "observed_span_days": resource.observed_span_days,
+        "slice_stats_by_threshold": dict(resource.slice_stats_by_threshold),
+        "exceedances_by_threshold": dict(resource.exceedances_by_threshold),
+    }
+    for field_name in _RESOURCE_SUSTAIN_FIELDS:
+        serialized[field_name] = _sustain_object(getattr(resource, field_name))
+    return {name: serialized[name] for name in _RESOURCE_FIELDS}
+
+
+def _serialize_grid(grid_metrics: GridMetrics) -> dict[str, Any]:
+    grid = grid_metrics.grid
+    serialized: dict[str, Any] = {
+        "grid": {
+            "label": grid.label,
+            "step_samples": int(grid.step_samples),
+            "cadence_seconds": (
+                float(grid.cadence.total_seconds()) if grid.cadence is not None else None
+            ),
+        },
+        "per_resource": {
+            rid: _serialize_resource(resource)
+            for rid, resource in grid_metrics.per_resource.items()
+        },
+        "n_eval_windows": grid_metrics.n_eval_windows,
+        "vus_pr": dict(grid_metrics.vus_pr),
+    }
+    for field_name in _GRID_SUSTAIN_FIELDS:
+        serialized[field_name] = _sustain_object(getattr(grid_metrics, field_name))
+    return {name: serialized[name] for name in _GRID_FIELDS}
+
+
+def _serialize_rubric_result(result: RubricResult) -> dict[str, Any]:
+    return {
+        "rubric_version": result.rubric_version,
+        "gates": [
+            {
+                "name": gate.name,
+                "required": gate.required,
+                "passed": gate.passed,
+                "grid": gate.grid,
+                "observed": gate.observed,
+                "detail": gate.detail,
+            }
+            for gate in result.gates
+        ],
+        "reported": dict(result.reported),
+        "passed": result.passed,
+    }
+
+
+def _serialize_case(name: str, metrics: CaseMetrics, rubric_result: RubricResult) -> dict[str, Any]:
+    return {
+        "name": name,
+        "kind": metrics.case_kind,
+        "grids": {label: _serialize_grid(grid) for label, grid in metrics.grids.items()},
+        "rubric": _serialize_rubric_result(rubric_result),
+        "reported": dict(metrics.context),
+    }
+
+
+def validate_report(report: dict[str, Any]) -> None:
+    """Check a report against the 9.3 schema enumeration.
+
+    Raises:
+        SpecError: On a missing or extra top-level, case, grid, per-resource,
+            or gate field, or a sustain-keyed object missing either of the
+            string keys "3" and "1".
+    """
+    problems: list[str] = []
+    if set(report) != {"provenance", "suite", "cases", "verdict", "exit_code"}:
+        problems.append(f"top-level keys are {sorted(report)}")
+    for case in report.get("cases", []):
+        name = case.get("name", "<unnamed>")
+        if set(case) != set(_CASE_ENTRY_FIELDS):
+            problems.append(f"case {name!r} keys are {sorted(case)}")
+            continue
+        for gate in case["rubric"]["gates"]:
+            if set(gate) != set(_GATE_FIELDS):
+                problems.append(f"case {name!r} gate keys are {sorted(gate)}")
+        for label, grid in case["grids"].items():
+            if set(grid) != set(_GRID_FIELDS):
+                problems.append(f"case {name!r} grid {label!r} keys are {sorted(grid)}")
+                continue
+            for field_name in _GRID_SUSTAIN_FIELDS:
+                if set(grid[field_name]) != {"3", "1"}:
+                    problems.append(
+                        f"case {name!r} grid {label!r} {field_name} is missing an accounting"
+                    )
+            for rid, resource in grid["per_resource"].items():
+                if set(resource) != set(_RESOURCE_FIELDS):
+                    problems.append(f"case {name!r} resource {rid!r} keys are {sorted(resource)}")
+                    continue
+                for field_name in _RESOURCE_SUSTAIN_FIELDS:
+                    if set(resource[field_name]) != {"3", "1"}:
+                        problems.append(
+                            f"case {name!r} resource {rid!r} {field_name} is missing an accounting"
+                        )
+    if problems:
+        raise SpecError("report violates the schema: " + "; ".join(problems))
+
+
 def run_suite(suite: dict[str, Any] | str, case_names: list[str] | None = None) -> dict[str, Any]:
     """Run every case of a suite: score, resolve thresholds, bundle, evaluate.
 
@@ -297,8 +496,11 @@ def run_suite(suite: dict[str, Any] | str, case_names: list[str] | None = None) 
         case_names: Optional case-name filter; unknown names are a SpecError.
 
     Returns:
-        Dict with the suite name, the rubric version, and one entry per case
-        carrying its name, kind, CaseMetrics, and RubricResult.
+        The full report: provenance, suite name, one serialized case entry per
+        case ({name, kind, grids, rubric, reported} with the context conduit
+        under ``reported``), the PASS/FAIL verdict, and the exit code (0 when
+        every required gate of every case passed, else 1). Validated against
+        the report schema before returning.
 
     Raises:
         SpecError: On unknown case names or a policy missing its parameters.
@@ -409,13 +611,33 @@ def run_suite(suite: dict[str, Any] | str, case_names: list[str] | None = None) 
             context=context,
         )
         rubric_result = evaluate_rubric(rubric, metrics)
-        results.append(
-            {
-                "name": case["name"],
-                "kind": metrics.case_kind,
-                "metrics": metrics,
-                "rubric_result": rubric_result,
-            }
-        )
+        results.append(_serialize_case(case["name"], metrics, rubric_result))
 
-    return {"suite": suite["suite"], "rubric_version": int(rubric["version"]), "cases": results}
+    if policy is not None:
+        policy_description = policy.describe()
+    else:
+        # healthy_split fits per case; the config-level identity is the
+        # reproducible statement.
+        policy_description = {"type": "healthy_split", "quantile": quantile}
+    provenance = build_provenance(
+        model_path=model_path,
+        profile=keeper.profile or profile,
+        seq_len=int(keeper.config["seq_len"]),
+        grids=grids,
+        sustains=SUSTAIN_ACCOUNTINGS,
+        detection_mode=mode,
+        policy_description=policy_description,
+        rubric_path=suite["rubric"],
+        rubric_version=int(rubric["version"]),
+        case_data_paths={case["name"]: case["capture"] for case in cases},
+    )
+    passed = all(case["rubric"]["passed"] for case in results)
+    report = {
+        "provenance": provenance,
+        "suite": suite["suite"],
+        "cases": results,
+        "verdict": "PASS" if passed else "FAIL",
+        "exit_code": 0 if passed else 1,
+    }
+    validate_report(report)
+    return report
