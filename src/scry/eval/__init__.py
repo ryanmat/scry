@@ -3,10 +3,10 @@
 
 """Evaluation harness for Scry.
 
-Torch-free members (detection, labels, hygiene) import eagerly. Torch-dependent
-members import lazily via PEP 562 ``__getattr__`` so torch-free consumers can
-use this package without pulling torch. Every name in ``__all__`` still
-resolves.
+Torch-free members (detection, labels, hygiene, metrics) import eagerly.
+Torch-dependent members import lazily via PEP 562 ``__getattr__`` so
+torch-free consumers can use this package without pulling torch. Every name
+in ``__all__`` still resolves.
 """
 
 from scry.eval.detection import (
@@ -33,6 +33,14 @@ from scry.eval.labels import (
     dump_labels,
     from_v1,
     load_labels,
+)
+from scry.eval.metrics import (
+    CASE_KINDS,
+    SUSTAIN_ACCOUNTINGS,
+    CaseMetrics,
+    GridMetrics,
+    ResourceMetrics,
+    compute_case_metrics,
 )
 
 # name -> source module, resolved on first access by __getattr__ below.
@@ -68,6 +76,7 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    "CASE_KINDS",
     "MIN_PER_RESOURCE_WINDOWS",
     "ONSET_NAMES",
     "REASON_DIVERGENT",
@@ -75,11 +84,14 @@ __all__ = [
     "REASON_TOO_FEW_WINDOWS",
     "ROLES",
     "SERVING_GRID",
+    "SUSTAIN_ACCOUNTINGS",
     "SUSTAIN_DEFAULT",
     "Candidate",
+    "CaseMetrics",
     "DetectionMode",
     "DetectionResult",
     "GlobalOverride",
+    "GridMetrics",
     "HealthySplitQuantile",
     "LabelCase",
     "LabelSet",
@@ -87,11 +99,13 @@ __all__ = [
     "ReconstructionCandidate",
     "ReferenceQuantile",
     "ResourceEligibility",
+    "ResourceMetrics",
     "ScoreSet",
     "ScoringGrid",
     "ServingBlock",
     "ThresholdPolicy",
     "anomaly_runs",
+    "compute_case_metrics",
     "dump_labels",
     "from_v1",
     "load_labels",

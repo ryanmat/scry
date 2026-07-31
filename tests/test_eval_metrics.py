@@ -17,9 +17,13 @@ phase-4 coverage miniature with exact fractions, the single-window
 one-grid-step alarm duration, the two-threshold lead-in FPR shape with the
 pooled_ aggregate differing from every per-resource number, incident grid
 assembly, the one-effective-step rule on both the cadence and the measured
-median-spacing grids, and the NotImplementedError guards on the
-unimplemented case kinds and on controls declared inside an incident
-capture.
+median-spacing grids, the control-inside-incident slice at own and incident
+thresholds, the multi-incident-plus-controls NotImplementedError, the
+healthy-reference sweep-semantics rates and duration-weighted fleet
+aggregation (including the master-2 wall-to-wall shape and the zero-span
+None rules), the negative_control-only case kind, the vus_pr placeholder
+and both-accountings sweep across all three kinds, and the eager package
+exports.
 """
 
 from __future__ import annotations
@@ -483,33 +487,283 @@ class TestComputeIncidentCaseMetrics:
         )
         assert case.grids["offline"].per_resource["node-a"].alarm_seconds_in_incident == 600.0
 
-    def test_unimplemented_case_shapes_raise(self) -> None:
+    def test_control_inside_incident_capture_sliced_at_both_thresholds(self) -> None:
+        # The phase-4 controls check in miniature: the control's windows over
+        # the incident's [T0 - lead_in, end] span, scored at its own resolved
+        # threshold AND at the incident resource's -- keys "own" + incident id.
+        incident_scores, labels = _phase4_miniature()
+        ends = incident_scores.end_times
+        control_errors = np.full(27, 0.2)
+        for stamp, value in (("11:30", 0.6), ("11:40", 0.6), ("12:50", 1.2)):
+            control_errors[ends == pd.Timestamp(f"2026-01-01T{stamp}:00Z")] = value
+        scores = _score_set(
+            np.concatenate([np.asarray(incident_scores.errors), control_errors]),
+            ends.append(ends),
+            ["node-a"] * 27 + ["node-ctl"] * 27,
+        )
+        control_case = LabelCase(
+            resource_id="node-ctl",
+            role="negative_control",
+            type=None,
+            onsets={},
+            primary_onset=None,
+            end=None,
+            notes=None,
+        )
+        mixed = LabelSet(version=2, capture=None, cases=list(labels.cases) + [control_case])
+        thresholds = {"node-a": (1.0, "override"), "node-ctl": (0.5, "per_resource")}
+        case = _compute(scores, mixed, thresholds)
+
+        assert case.case_kind == "incident"
+        grid = case.grids["serving"]
+        assert set(grid.per_resource) == {"node-a", "node-ctl"}
+        control = grid.per_resource["node-ctl"]
+        assert control.role == "negative_control"
+        assert set(control.slice_stats_by_threshold) == {"own", "node-a"}
+        assert control.exceedances_by_threshold == {"own": 3, "node-a": 1}
+        own_stats = control.slice_stats_by_threshold["own"]
+        assert own_stats["n_windows_in_slice"] == 19  # ends in [11:00, 14:00]
+        assert own_stats["over_0.5000"]["windows_over"] == 3
+        assert own_stats["over_0.5000"]["sustained_runs"] == 0  # 2-run + isolated at sustain 3
+        assert control.slice_stats_by_threshold["node-a"]["over_1.0000"]["windows_over"] == 1
+        assert control.sustained_run_counts == {3: 0, 1: 2}
+        assert control.detection is None
+        assert control.lead_in_fpr == {}
+        assert control.time_in_alarm_fraction == {}
+        # The incident resource is unchanged beside it; pooling stays incident-only.
+        assert grid.per_resource["node-a"].coverage_fraction == 0.25
+        assert grid.pooled_lead_in_fpr[1] is not None
+
+    def test_control_with_multiple_incidents_not_implemented(self) -> None:
         scores, labels = _phase4_miniature()
-        healthy = LabelSet(version=2, capture=None, cases=[])
-        with pytest.raises(NotImplementedError, match="not implemented"):
-            _compute(scores, healthy, {})
-        control_only = LabelSet(
-            version=2,
-            capture=None,
-            cases=[
-                LabelCase(
-                    resource_id="node-b",
-                    role="negative_control",
-                    type=None,
-                    onsets={},
-                    primary_onset=None,
-                    end=None,
-                    notes=None,
-                )
-            ],
+        second_incident = LabelCase(
+            resource_id="node-b",
+            role="incident",
+            type="cpu",
+            onsets={"T0": pd.Timestamp("2026-01-01T12:30:00Z")},
+            primary_onset="T0",
+            end=pd.Timestamp("2026-01-01T14:00:00Z"),
+            notes=None,
         )
-        with pytest.raises(NotImplementedError, match="not implemented"):
-            _compute(scores, control_only, {})
+        control_case = LabelCase(
+            resource_id="node-ctl",
+            role="negative_control",
+            type=None,
+            onsets={},
+            primary_onset=None,
+            end=None,
+            notes=None,
+        )
         mixed = LabelSet(
-            version=2, capture=None, cases=list(labels.cases) + list(control_only.cases)
+            version=2, capture=None, cases=[*labels.cases, second_incident, control_case]
         )
-        with pytest.raises(NotImplementedError, match="negative-control slicing"):
-            _compute(scores, mixed, {"node-a": (1.0, "override")})
+        with pytest.raises(NotImplementedError, match="single incident"):
+            _compute(scores, mixed, {"node-a": (1.0, "override"), "node-b": (1.0, "override")})
+
+
+_HEALTHY_THRESHOLDS = {"node-hot": (0.5, "global"), "node-quiet": (0.5, "global")}
+
+
+def _healthy_fleet_scores() -> ScoreSet:
+    """Two resources, 505 ten-minute windows each: a 3.5-day observed span.
+
+    node-hot is over threshold wall to wall (the master-2 shape: one run, the
+    time-in-alarm fraction shows what the run count hides). node-quiet has
+    five isolated single-window exceedances plus one 3-window run.
+    """
+    ends = pd.date_range("2026-01-01T00:00:00Z", periods=505, freq="10min")
+    hot = np.full(505, 2.0)
+    quiet = np.full(505, 0.1)
+    for index in (50, 100, 150, 200, 250):
+        quiet[index] = 0.7
+    quiet[300:303] = 0.7
+    return _score_set(
+        np.concatenate([hot, quiet]), ends.append(ends), ["node-hot"] * 505 + ["node-quiet"] * 505
+    )
+
+
+class TestHealthyAndControlCases:
+    def test_healthy_reference_rates_and_fractions(self) -> None:
+        # Span = 504 ten-minute steps = 3.5 days (the sweep's span_days: last
+        # minus first, no step added). Alarm durations carry the +one-step
+        # wall rule, so the wall-to-wall alarm reads slightly above 1.0.
+        empty = LabelSet(version=2, capture=None, cases=[])
+        case = _compute(_healthy_fleet_scores(), empty, _HEALTHY_THRESHOLDS)
+
+        assert case.case_kind == "healthy_reference"
+        grid = case.grids["serving"]
+        hot = grid.per_resource["node-hot"]
+        assert hot.role == "excluded"
+        assert hot.observed_span_days == 3.5
+        assert hot.sustained_run_counts == {3: 1, 1: 1}
+        assert hot.runs_per_week == {3: 2.0, 1: 2.0}
+        assert hot.raises_per_week == {3: 2.0, 1: 2.0}
+        assert hot.time_in_alarm_fraction == {3: 303000.0 / 302400.0, 1: 303000.0 / 302400.0}
+        assert hot.detection is None
+        assert hot.lead_in_fpr == {}
+        assert hot.slice_stats_by_threshold == {}
+
+        quiet = grid.per_resource["node-quiet"]
+        assert quiet.sustained_run_counts == {3: 1, 1: 6}
+        assert quiet.runs_per_week == {3: 2.0, 1: 12.0}
+        assert quiet.raises_per_week == {3: 2.0, 1: 12.0}
+        assert quiet.time_in_alarm_fraction == {3: 1800.0 / 302400.0, 1: 4800.0 / 302400.0}
+
+    def test_fleet_aggregation_is_duration_weighted(self) -> None:
+        empty = LabelSet(version=2, capture=None, cases=[])
+        grid = _compute(_healthy_fleet_scores(), empty, _HEALTHY_THRESHOLDS).grids["serving"]
+
+        assert grid.fleet_runs_per_week == {3: 4.0, 1: 14.0}
+        assert grid.fleet_raises_per_week == {3: 4.0, 1: 14.0}
+        assert grid.fleet_time_in_alarm_fraction == {
+            3: 304800.0 / 604800.0,
+            1: 307800.0 / 604800.0,
+        }
+        assert grid.pooled_lead_in_fpr == {}
+        assert grid.n_eval_windows == 1010
+
+    def test_zero_span_resource_rates_none_and_fleet_sums_none_as_zero(self) -> None:
+        # A single-window resource on a cadence-less grid has no observed
+        # span: its rates and fraction are None, and the fleet sums treat
+        # None as 0.0 (rates) and contribute nothing to either duration sum.
+        offline = ScoringGrid(label="offline", step_samples=10)
+        ends_x = pd.date_range("2026-01-01T00:00:00Z", periods=8, freq="10min")
+        errors_x = np.full(8, 0.1)
+        errors_x[2] = 0.9
+        errors_x[5] = 0.9
+        solo_end = pd.DatetimeIndex([pd.Timestamp("2026-01-01T02:00:00Z")])
+        scores = ScoreSet(
+            errors=np.concatenate([errors_x, [0.9]]),
+            end_times=ends_x.append(solo_end),
+            resource_ids=np.array(["node-x"] * 8 + ["node-solo"]),
+            grid=offline,
+            meta={},
+        )
+        empty = LabelSet(version=2, capture=None, cases=[])
+        thresholds = {"node-x": (0.5, "global"), "node-solo": (0.5, "global")}
+        case = compute_case_metrics(
+            "fleet",
+            {"offline": scores},
+            empty,
+            thresholds,
+            mode="no_bridging",
+            onset_anchor="T0",
+            sustain=3,
+            lead_in=pd.Timedelta(hours=1),
+            max_leadtime=pd.Timedelta(hours=2),
+        )
+
+        grid = case.grids["offline"]
+        solo = grid.per_resource["node-solo"]
+        assert solo.observed_span_days == 0.0
+        assert solo.runs_per_week == {3: None, 1: None}
+        assert solo.raises_per_week == {3: None, 1: None}
+        assert solo.time_in_alarm_fraction == {3: None, 1: None}
+        assert solo.sustained_run_counts == {3: 0, 1: 1}
+        assert grid.fleet_runs_per_week == {3: 0.0, 1: 7.0 * 2 / (4200.0 / 86400.0)}
+        assert grid.fleet_time_in_alarm_fraction == {3: 0.0, 1: 1200.0 / 4200.0}
+
+    def test_negative_control_only_case_kind(self) -> None:
+        ends = pd.date_range("2026-01-01T00:00:00Z", periods=8, freq="10min")
+        declared = np.full(8, 0.1)
+        declared[3:6] = 0.9
+        unlabeled = np.full(8, 0.1)
+        scores = _score_set(
+            np.concatenate([declared, unlabeled]),
+            ends.append(ends),
+            ["node-ctl"] * 8 + ["node-b"] * 8,
+        )
+        control_case = LabelCase(
+            resource_id="node-ctl",
+            role="negative_control",
+            type=None,
+            onsets={},
+            primary_onset=None,
+            end=None,
+            notes=None,
+        )
+        labels = LabelSet(version=2, capture=None, cases=[control_case])
+        thresholds = {"node-ctl": (0.5, "per_resource"), "node-b": (0.5, "global")}
+        case = _compute(scores, labels, thresholds)
+
+        assert case.case_kind == "negative_control"
+        grid = case.grids["serving"]
+        control = grid.per_resource["node-ctl"]
+        assert control.role == "negative_control"
+        assert control.sustained_run_counts == {3: 1, 1: 1}
+        assert set(control.runs_per_week) == {3, 1}
+        assert control.slice_stats_by_threshold == {}  # no incident to slice against
+        assert grid.per_resource["node-b"].role == "excluded"
+        assert set(grid.fleet_runs_per_week) == {3, 1}
+
+    def test_vus_pr_placeholder_and_both_accountings_on_every_kind(self) -> None:
+        incident_scores, incident_labels_set = _phase4_miniature()
+        control_case = LabelCase(
+            resource_id="node-a",
+            role="negative_control",
+            type=None,
+            onsets={},
+            primary_onset=None,
+            end=None,
+            notes=None,
+        )
+        produced = [
+            _compute(incident_scores, incident_labels_set, {"node-a": (1.0, "override")}),
+            _compute(
+                _healthy_fleet_scores(),
+                LabelSet(version=2, capture=None, cases=[]),
+                _HEALTHY_THRESHOLDS,
+            ),
+            _compute(
+                incident_scores,
+                LabelSet(version=2, capture=None, cases=[control_case]),
+                {"node-a": (0.5, "per_resource")},
+            ),
+        ]
+        assert [case.case_kind for case in produced] == [
+            "incident",
+            "healthy_reference",
+            "negative_control",
+        ]
+        for case in produced:
+            for grid in case.grids.values():
+                assert grid.vus_pr == {"value": None, "reason": "not implemented"}
+                for sustain_dict in (
+                    grid.pooled_lead_in_fpr,
+                    grid.fleet_time_in_alarm_fraction,
+                    grid.fleet_raises_per_week,
+                    grid.fleet_runs_per_week,
+                ):
+                    assert sustain_dict == {} or set(sustain_dict) >= {3, 1}
+                for resource in grid.per_resource.values():
+                    for sustain_dict in (
+                        resource.lead_in_fpr,
+                        resource.time_in_alarm_fraction,
+                        resource.raises_per_week,
+                        resource.runs_per_week,
+                        resource.sustained_run_counts,
+                    ):
+                        assert sustain_dict == {} or set(sustain_dict) >= {3, 1}
+                    assert set(resource.sustained_run_counts) >= {3, 1}
+
+
+class TestEagerExports:
+    def test_metrics_members_export_eagerly(self) -> None:
+        import scry.eval
+        from scry.eval import metrics as metrics_module
+
+        names = (
+            "CASE_KINDS",
+            "SUSTAIN_ACCOUNTINGS",
+            "CaseMetrics",
+            "GridMetrics",
+            "ResourceMetrics",
+            "compute_case_metrics",
+        )
+        for name in names:
+            assert getattr(scry.eval, name) is getattr(metrics_module, name)
+            assert name in scry.eval.__all__
+            assert name in vars(scry.eval)  # eager, not resolved via __getattr__
 
 
 class TestTorchFreeImport:

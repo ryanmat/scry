@@ -22,13 +22,18 @@ healthy-reference capture takes no labels, so its resources carry whatever
 labels role applies.
 
 ``compute_case_metrics`` is the producer: it consumes ScoreSets, a LabelSet,
-and resolved per-resource thresholds, and computes the incident branch --
-one detection per resource anchored at the rubric's onset anchor with
-arithmetic leads against every named onset, lead-in FPR at each resource's
-own threshold for both accountings with the pooled_ window-pooling
-aggregate, and the amendment-5 incident-coverage numbers from alarm spans
-carrying the one-effective-grid-step wall-duration rule. Everything here is
-importable without torch.
+and resolved per-resource thresholds. Incident cases get one detection per
+resource anchored at the rubric's onset anchor with arithmetic leads against
+every named onset, lead-in FPR at each resource's own threshold for both
+accountings with the pooled_ window-pooling aggregate, the amendment-5
+incident-coverage numbers from alarm spans carrying the
+one-effective-grid-step wall-duration rule, and declared controls sliced
+over the incident's span at their own and the incident resource's
+thresholds. Healthy-reference and control-only cases get the
+duration-weighted alarm-fatigue metrics (the sweep's span_days and per_week
+semantics) with fleet aggregates summing rates (None as 0.0) and dividing
+summed alarm seconds by summed span seconds. Everything here is importable
+without torch.
 """
 
 from __future__ import annotations
@@ -45,6 +50,7 @@ from scry.eval.detection import (
     DetectionResult,
     anomaly_runs,
     select_detection,
+    slice_stats,
 )
 from scry.eval.labels import ROLES, LabelCase, LabelSet
 
@@ -214,6 +220,36 @@ def _covered_windows(flags: np.ndarray, sustain: int) -> int:
     return sum(end - start + 1 for start, end in anomaly_runs(flags, sustain))
 
 
+def _vus_pr_placeholder() -> dict[str, Any]:
+    """The vus_pr field until scry/eval/vus.py lands: null value, stated reason."""
+    return {"value": None, "reason": "not implemented"}
+
+
+def _resolved_threshold(thresholds: Mapping[str, tuple[float, str]], rid: str) -> tuple[float, str]:
+    if rid not in thresholds:
+        raise ValueError(f"no resolved threshold for resource {rid!r}")
+    return thresholds[rid]
+
+
+def _sorted_slice(
+    errors: np.ndarray, resource_ids: np.ndarray, end_times: pd.DatetimeIndex, rid: str
+) -> tuple[np.ndarray, pd.DatetimeIndex]:
+    """One resource's errors and end times, stably ordered by end time."""
+    mask = resource_ids == rid
+    ends = end_times[mask]
+    order = np.argsort(ends.values, kind="stable")
+    return errors[mask][order], ends[order]
+
+
+def _alarm_seconds(
+    flags: np.ndarray, ends: pd.DatetimeIndex, sustain: int, step: pd.Timedelta
+) -> float:
+    """Total alarm wall duration: each run lasts last end - first end + one step."""
+    return float(
+        sum(((ends[j] - ends[i]) + step).total_seconds() for i, j in anomaly_runs(flags, sustain))
+    )
+
+
 def _incident_coverage(
     alarm_spans: list[tuple[pd.Timestamp, pd.Timestamp]],
     start: pd.Timestamp,
@@ -339,6 +375,61 @@ def _incident_resource_metrics(
     return metrics, covered_by_sustain, n_lead_in
 
 
+def _control_resource_metrics(
+    control: LabelCase,
+    incident: LabelCase,
+    errors: np.ndarray,
+    ends: pd.DatetimeIndex,
+    threshold: float,
+    source: str,
+    incident_threshold: float,
+    *,
+    sustain: int,
+    lead_in: pd.Timedelta,
+) -> ResourceMetrics:
+    """One control's metrics, sliced over the incident's ``[primary - lead_in, end]`` span.
+
+    The control is scored with ``slice_stats`` at its own resolved threshold
+    (key ``"own"``) and at the incident resource's (keyed by that resource id),
+    so a control that would have alarmed on a neighbour's threshold is visible.
+    """
+    primary_ts = incident.onsets[incident.primary_onset]
+    start = primary_ts - lead_in
+    slice_stats_by_threshold: dict[str, dict[str, Any]] = {}
+    exceedances: dict[str, int] = {}
+    for key, at_threshold in (("own", threshold), (incident.resource_id, incident_threshold)):
+        stats = slice_stats(errors, ends, start, incident.end, [at_threshold], sustain)
+        slice_stats_by_threshold[key] = stats
+        exceedances[key] = stats[f"over_{at_threshold:.4f}"]["windows_over"]
+
+    full_flags = errors > threshold
+    return ResourceMetrics(
+        resource_id=control.resource_id,
+        role="negative_control",
+        threshold=threshold,
+        threshold_source=source,
+        n_eval_windows=int(ends.size),
+        detection=None,
+        detection_time=None,
+        lead_seconds_by_onset={},
+        lead_in_fpr={},
+        n_lead_in_windows=0,
+        coverage_fraction=None,
+        clear_lead_vs_end_s=None,
+        alarm_seconds_in_incident=None,
+        time_in_alarm_fraction={},
+        raises_per_week={},
+        runs_per_week={},
+        sustained_run_counts={
+            accounting: len(anomaly_runs(full_flags, accounting))
+            for accounting in SUSTAIN_ACCOUNTINGS
+        },
+        observed_span_days=None,
+        slice_stats_by_threshold=slice_stats_by_threshold,
+        exceedances_by_threshold=exceedances,
+    )
+
+
 def _incident_grid_metrics(
     scores: ScoreSet,
     labels: LabelSet,
@@ -350,23 +441,24 @@ def _incident_grid_metrics(
     lead_in: pd.Timedelta,
     max_leadtime: pd.Timedelta,
 ) -> GridMetrics:
-    """One grid's incident-case metrics: per-resource bundles plus the pooled lead-in FPR."""
+    """One grid's incident-case metrics: incident and control bundles plus the pooled lead-in FPR."""
     errors = np.asarray(scores.errors)
     resource_ids = np.asarray(scores.resource_ids).astype(str)
+    incidents = labels.incidents()
+    controls = labels.negative_controls()
+    if controls and len(incidents) > 1:
+        raise NotImplementedError(
+            "negative-control slicing is defined against a single incident case; "
+            f"the labels declare {len(incidents)}"
+        )
 
     per_resource: dict[str, ResourceMetrics] = {}
     pooled_covered = dict.fromkeys(SUSTAIN_ACCOUNTINGS, 0)
     pooled_lead_in_windows = 0
-    for case in labels.incidents():
+    for case in incidents:
         rid = case.resource_id
-        if rid not in thresholds:
-            raise ValueError(f"no resolved threshold for incident resource {rid!r}")
-        mask = resource_ids == rid
-        ends_r = scores.end_times[mask]
-        order = np.argsort(ends_r.values, kind="stable")
-        ends_r = ends_r[order]
-        errs_r = errors[mask][order]
-        threshold, source = thresholds[rid]
+        threshold, source = _resolved_threshold(thresholds, rid)
+        errs_r, ends_r = _sorted_slice(errors, resource_ids, scores.end_times, rid)
         metrics, covered_by_sustain, n_lead_in = _incident_resource_metrics(
             case,
             errs_r,
@@ -385,9 +477,27 @@ def _incident_grid_metrics(
             pooled_covered[accounting] += covered_by_sustain[accounting]
         pooled_lead_in_windows += n_lead_in
 
-    # Pooled = pooled WINDOWS, each judged at its own resource's threshold
-    # (spec 7.4: every resource scores against its OWN threshold; pooled
-    # aggregates are labeled pooled_ with the per-resource breakdown beside).
+    for control in controls:
+        rid = control.resource_id
+        threshold, source = _resolved_threshold(thresholds, rid)
+        errs_r, ends_r = _sorted_slice(errors, resource_ids, scores.end_times, rid)
+        incident = incidents[0]
+        per_resource[rid] = _control_resource_metrics(
+            control,
+            incident,
+            errs_r,
+            ends_r,
+            threshold,
+            source,
+            _resolved_threshold(thresholds, incident.resource_id)[0],
+            sustain=sustain,
+            lead_in=lead_in,
+        )
+
+    # Pooled = pooled WINDOWS over the incident resources, each judged at its
+    # own threshold (spec 7.4: every resource scores against its OWN
+    # threshold; pooled aggregates are labeled pooled_ with the per-resource
+    # breakdown beside).
     pooled_lead_in_fpr = {
         accounting: (
             pooled_covered[accounting] / pooled_lead_in_windows if pooled_lead_in_windows else None
@@ -402,7 +512,118 @@ def _incident_grid_metrics(
         fleet_raises_per_week={},
         fleet_runs_per_week={},
         n_eval_windows=sum(metrics.n_eval_windows for metrics in per_resource.values()),
-        vus_pr={"value": None, "reason": "not implemented"},
+        vus_pr=_vus_pr_placeholder(),
+    )
+
+
+def _healthy_resource_metrics(
+    rid: str,
+    role: str,
+    errors: np.ndarray,
+    ends: pd.DatetimeIndex,
+    threshold: float,
+    source: str,
+    step: pd.Timedelta,
+) -> tuple[ResourceMetrics, dict[int, float], float]:
+    """One resource's duration-weighted alarm-fatigue metrics on a healthy span.
+
+    The observed span is the sweep's ``span_days``: last end minus first end,
+    zero below two windows (rates and fractions are then None). Alarm
+    durations carry the +one-step wall rule, so a wall-to-wall alarm reads
+    slightly above 1.0. Returns (metrics, alarm seconds by sustain,
+    span seconds) for the fleet aggregation.
+    """
+    flags = errors > threshold
+    span_seconds = float((ends.max() - ends.min()).total_seconds()) if len(ends) >= 2 else 0.0
+    span_days = span_seconds / 86400.0
+
+    run_counts: dict[int, int] = {}
+    alarm_by_sustain: dict[int, float] = {}
+    rates: dict[int, float | None] = {}
+    time_in_alarm: dict[int, float | None] = {}
+    for accounting in SUSTAIN_ACCOUNTINGS:
+        n_runs = len(anomaly_runs(flags, accounting))
+        run_counts[accounting] = n_runs
+        alarm_by_sustain[accounting] = _alarm_seconds(flags, ends, accounting, step)
+        rates[accounting] = 7.0 * n_runs / span_days if span_days > 0 else None
+        time_in_alarm[accounting] = (
+            alarm_by_sustain[accounting] / span_seconds if span_seconds > 0 else None
+        )
+
+    metrics = ResourceMetrics(
+        resource_id=rid,
+        role=role,
+        threshold=threshold,
+        threshold_source=source,
+        n_eval_windows=int(ends.size),
+        detection=None,
+        detection_time=None,
+        lead_seconds_by_onset={},
+        lead_in_fpr={},
+        n_lead_in_windows=0,
+        coverage_fraction=None,
+        clear_lead_vs_end_s=None,
+        alarm_seconds_in_incident=None,
+        time_in_alarm_fraction=time_in_alarm,
+        # A raise is the start of a maximal over-threshold run, so at
+        # accounting s the raise count equals the run count by construction.
+        raises_per_week=dict(rates),
+        runs_per_week=dict(rates),
+        sustained_run_counts=run_counts,
+        observed_span_days=span_days,
+        slice_stats_by_threshold={},
+        exceedances_by_threshold={},
+    )
+    return metrics, alarm_by_sustain, span_seconds
+
+
+def _healthy_grid_metrics(
+    scores: ScoreSet,
+    labels: LabelSet,
+    thresholds: Mapping[str, tuple[float, str]],
+) -> GridMetrics:
+    """One grid's healthy-reference (or control-only) metrics with fleet aggregates."""
+    errors = np.asarray(scores.errors)
+    resource_ids = np.asarray(scores.resource_ids).astype(str)
+
+    per_resource: dict[str, ResourceMetrics] = {}
+    alarm_totals = dict.fromkeys(SUSTAIN_ACCOUNTINGS, 0.0)
+    rate_totals = dict.fromkeys(SUSTAIN_ACCOUNTINGS, 0.0)
+    span_total = 0.0
+    for rid in sorted(set(resource_ids)):
+        threshold, source = _resolved_threshold(thresholds, rid)
+        errs_r, ends_r = _sorted_slice(errors, resource_ids, scores.end_times, rid)
+        metrics, alarm_by_sustain, span_seconds = _healthy_resource_metrics(
+            rid,
+            labels.role_for(rid),
+            errs_r,
+            ends_r,
+            threshold,
+            source,
+            _effective_step(scores.grid, ends_r),
+        )
+        per_resource[rid] = metrics
+        span_total += span_seconds
+        for accounting in SUSTAIN_ACCOUNTINGS:
+            alarm_totals[accounting] += alarm_by_sustain[accounting]
+            rate_totals[accounting] += metrics.runs_per_week[accounting] or 0.0
+
+    # Fleet rates sum per-resource rates (None as 0.0); the fleet fraction is
+    # duration-weighted: sum of alarm seconds over sum of span seconds.
+    fleet_time = {
+        accounting: (alarm_totals[accounting] / span_total if span_total > 0 else None)
+        for accounting in SUSTAIN_ACCOUNTINGS
+    }
+    fleet_rates = {accounting: rate_totals[accounting] for accounting in SUSTAIN_ACCOUNTINGS}
+    return GridMetrics(
+        grid=scores.grid,
+        per_resource=per_resource,
+        pooled_lead_in_fpr={},
+        fleet_time_in_alarm_fraction=fleet_time,
+        fleet_raises_per_week=dict(fleet_rates),
+        fleet_runs_per_week=dict(fleet_rates),
+        n_eval_windows=sum(metrics.n_eval_windows for metrics in per_resource.values()),
+        vus_pr=_vus_pr_placeholder(),
     )
 
 
@@ -422,13 +643,23 @@ def compute_case_metrics(
     """Compute one case's metric bundle from scored grids and labels.
 
     The case kind follows the labels: declared incidents make an incident
-    case. For each grid and each incident resource, exactly one detection is
-    selected at the rubric's ``onset_anchor`` over ``[anchor - max_leadtime,
-    end]``; leads against every other named onset are arithmetic from that
-    single detection time. Lead-in FPR is computed per resource at its OWN
-    resolved threshold over ``[primary_onset - lead_in, primary_onset)`` for
-    both sustain accountings, with the pooled_ aggregate pooling windows
-    across resources, never thresholds.
+    case, declared controls with no incident a negative_control case, and no
+    labels at all a healthy_reference case (every resource treated as
+    negative/healthy).
+
+    On an incident case, for each grid and each incident resource, exactly
+    one detection is selected at the rubric's ``onset_anchor`` over
+    ``[anchor - max_leadtime, end]``; leads against every other named onset
+    are arithmetic from that single detection time. Lead-in FPR is computed
+    per resource at its OWN resolved threshold over ``[primary_onset -
+    lead_in, primary_onset)`` for both sustain accountings, with the pooled_
+    aggregate pooling windows across resources, never thresholds. Declared
+    controls in the same capture are sliced over the incident's span at their
+    own and the incident resource's thresholds.
+
+    On healthy_reference and negative_control cases, every scored resource
+    gets the duration-weighted alarm-fatigue metrics with the fleet
+    aggregates on the grid.
 
     Args:
         case_id: The suite case name.
@@ -445,32 +676,31 @@ def compute_case_metrics(
     Raises:
         ValueError: On a missing threshold, an absent anchor onset, or an
             incident case without a primary onset.
-        NotImplementedError: For healthy-reference and negative-control cases,
-            and for control resources declared inside an incident capture.
+        NotImplementedError: For controls declared alongside more than one
+            incident case (the flat "own" slice key is defined against a
+            single incident).
     """
-    if not labels.incidents():
-        raise NotImplementedError(
-            "healthy-reference and negative-control case computation is not implemented"
-        )
-    if labels.negative_controls():
-        raise NotImplementedError(
-            "negative-control slicing inside incident captures is not implemented"
-        )
-    case_kind = "incident"
-
-    grids = {
-        label: _incident_grid_metrics(
-            scores,
-            labels,
-            thresholds,
-            mode=mode,
-            onset_anchor=onset_anchor,
-            sustain=sustain,
-            lead_in=lead_in,
-            max_leadtime=max_leadtime,
-        )
-        for label, scores in scores_by_grid.items()
-    }
+    if labels.incidents():
+        case_kind = "incident"
+        grids = {
+            label: _incident_grid_metrics(
+                scores,
+                labels,
+                thresholds,
+                mode=mode,
+                onset_anchor=onset_anchor,
+                sustain=sustain,
+                lead_in=lead_in,
+                max_leadtime=max_leadtime,
+            )
+            for label, scores in scores_by_grid.items()
+        }
+    else:
+        case_kind = "negative_control" if labels.negative_controls() else "healthy_reference"
+        grids = {
+            label: _healthy_grid_metrics(scores, labels, thresholds)
+            for label, scores in scores_by_grid.items()
+        }
     return CaseMetrics(
         case_id=case_id, case_kind=case_kind, grids=grids, context=dict(context or {})
     )
