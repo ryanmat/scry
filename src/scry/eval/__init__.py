@@ -42,6 +42,13 @@ from scry.eval.metrics import (
     ResourceMetrics,
     compute_case_metrics,
 )
+from scry.eval.rubric import (
+    GateResult,
+    RubricResult,
+    SpecError,
+    evaluate_rubric,
+    load_rubric,
+)
 
 # name -> source module, resolved on first access by __getattr__ below.
 _LAZY_EXPORTS: dict[str, str] = {
@@ -90,6 +97,7 @@ __all__ = [
     "CaseMetrics",
     "DetectionMode",
     "DetectionResult",
+    "GateResult",
     "GlobalOverride",
     "GridMetrics",
     "HealthySplitQuantile",
@@ -100,15 +108,19 @@ __all__ = [
     "ReferenceQuantile",
     "ResourceEligibility",
     "ResourceMetrics",
+    "RubricResult",
     "ScoreSet",
     "ScoringGrid",
     "ServingBlock",
+    "SpecError",
     "ThresholdPolicy",
     "anomaly_runs",
     "compute_case_metrics",
     "dump_labels",
+    "evaluate_rubric",
     "from_v1",
     "load_labels",
+    "load_rubric",
     "per_resource_eligibility",
     "per_resource_time_split",
     "select_detection",
