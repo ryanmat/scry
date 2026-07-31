@@ -569,6 +569,71 @@ class TestBindingAndRollup:
             evaluate_rubric(_rubric({"bogus_gate": {"required": True}}), case)
 
 
+_TRACKED_RUBRIC = Path(__file__).resolve().parent.parent / "config" / "rubrics" / "aro_node_v1.yaml"
+
+
+class TestTrackedRubric:
+    def test_round_trips_and_matches_the_spec_gate_list(self) -> None:
+        rubric = load_rubric(str(_TRACKED_RUBRIC))
+        assert rubric["version"] == 1
+        assert rubric["profile"] == "aro_node"
+        assert rubric["detection"] == {
+            "mode": "no_bridging",
+            "onset_anchor": "T0",
+            "sustain": 3,
+            "max_leadtime_minutes": 120,
+            "lead_in_hours": 24,
+        }
+        assert rubric["grids"] == {
+            "offline": {"step_samples": 10},
+            "serving": {"step_samples": 1, "cadence_minutes": 10},
+        }
+        assert rubric["headline_grid"] == "serving"
+        assert list(rubric["gates"]) == list(GATE_NAMES)
+        assert rubric["gates"]["detection_lead"] == {
+            "required": True,
+            "min_lead_vs": "T2",
+            "min_lead_seconds": 0,
+        }
+        assert rubric["gates"]["lead_in_fpr"] == {
+            "required": True,
+            "max_fraction": 0.02,
+            "min_eval_windows": 150,
+        }
+        assert rubric["gates"]["alarm_fatigue"] == {
+            "required": True,
+            "grid": "serving",
+            "sustain": 1,
+            "max_time_in_alarm_fraction_per_resource": 0.05,
+            "max_fleet_raises_per_week": 10,
+        }
+        for name in (
+            "no_pre_onset_bridging",
+            "negative_controls_clean",
+            "coverage_integrity",
+            "sanity",
+        ):
+            assert rubric["gates"][name] == {"required": True}
+        assert set(rubric["reported"]) == {
+            "vus_pr",
+            "incident_coverage",
+            "deployed_config_accounting",
+        }
+        assert rubric["reported"]["deployed_config_accounting"] == {"grid": "serving", "sustain": 1}
+
+    def test_known_divergences_nonempty_with_sustain1_pin(self) -> None:
+        divergences = load_rubric(str(_TRACKED_RUBRIC))["known_divergences"]
+        assert divergences
+        assert any("sustain-1" in entry for entry in divergences)
+
+    def test_comment_hygiene_cites_nothing_untracked(self) -> None:
+        # The file is tracked in a public repo: no gitignored paths, capture
+        # directories, or local artifact documents in its text.
+        text = _TRACKED_RUBRIC.read_text()
+        for forbidden in ("data/captures", "data/serving", "RESULTS.md", "ACTIVATION.md"):
+            assert forbidden not in text, forbidden
+
+
 class TestTorchFreeImport:
     def test_rubric_module_imports_without_torch(self) -> None:
         proc = subprocess.run(
