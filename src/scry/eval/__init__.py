@@ -65,6 +65,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "ServingBlock": "scry.eval.candidate",
     "ThresholdPolicy": "scry.eval.candidate",
     "per_resource_time_split": "scry.eval.scoring",
+    "run_suite": "scry.eval.suite",
     "warn_missing_model_features": "scry.eval.scoring",
     "windows_for_keeper": "scry.eval.scoring",
 }
@@ -125,6 +126,7 @@ __all__ = [
     "load_rubric",
     "per_resource_eligibility",
     "per_resource_time_split",
+    "run_suite",
     "select_detection",
     "slice_stats",
     "warn_missing_model_features",
