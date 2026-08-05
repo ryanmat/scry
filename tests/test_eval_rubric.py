@@ -592,27 +592,30 @@ class TestTrackedRubric:
         assert list(rubric["gates"]) == list(GATE_NAMES)
         assert rubric["gates"]["detection_lead"] == {
             "required": True,
+            "allow_absent": True,
             "min_lead_vs": "T2",
             "min_lead_seconds": 0,
         }
         assert rubric["gates"]["lead_in_fpr"] == {
             "required": True,
+            "allow_absent": True,
             "max_fraction": 0.02,
             "min_eval_windows": 150,
         }
         assert rubric["gates"]["alarm_fatigue"] == {
             "required": True,
+            "allow_absent": True,
             "grid": "serving",
             "sustain": 1,
             "max_time_in_alarm_fraction_per_resource": 0.05,
             "max_fleet_raises_per_week": 10,
         }
-        for name in (
-            "no_pre_onset_bridging",
-            "negative_controls_clean",
-            "coverage_integrity",
-            "sanity",
-        ):
+        # Kind-scoped gates carry allow_absent so the rubric is evaluable at all;
+        # the two that apply to every case kind must NOT carry it, or a rubric
+        # could pass with no coverage or sanity check ever having run.
+        for name in ("no_pre_onset_bridging", "negative_controls_clean"):
+            assert rubric["gates"][name] == {"required": True, "allow_absent": True}
+        for name in ("coverage_integrity", "sanity"):
             assert rubric["gates"][name] == {"required": True}
         assert set(rubric["reported"]) == {
             "vus_pr",
