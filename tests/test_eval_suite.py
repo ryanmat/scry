@@ -43,9 +43,15 @@ from pathlib import Path
 import pandas as pd
 import pytest
 import yaml
-from synth import PROFILE, gen_capture, make_incident, write_csv, write_labels
+from synth import (
+    PROFILE,
+    gen_capture,
+    make_incident,
+    write_csv,
+    write_labels,
+    write_run_suite_tree,
+)
 
-from scry.eval.labels import LabelCase, LabelSet, dump_labels
 from scry.eval.provenance import build_provenance
 from scry.eval.rubric import SpecError
 from scry.eval.scoring import ScoringGrid
@@ -265,140 +271,6 @@ class TestLoadSuite:
             load_suite(_dump_suite(suite_dir, suite))
 
 
-# Kind-scoped gates carry allow_absent so a mixed suite evaluates: the
-# detection gates and controls gate are absent on the healthy case, and
-# alarm_fatigue is absent on the incident case.
-_RUN_RUBRIC = {
-    "version": 1,
-    "profile": "aro_node",
-    "detection": {
-        "mode": "no_bridging",
-        "onset_anchor": "T0",
-        "sustain": 3,
-        "max_leadtime_minutes": 120,
-        "lead_in_hours": 1,
-    },
-    "grids": {
-        "offline": {"step_samples": 10},
-        "serving": {"step_samples": 1, "cadence_minutes": 10},
-    },
-    "headline_grid": "serving",
-    "gates": {
-        "no_pre_onset_bridging": {"required": True, "allow_absent": True},
-        "detection_lead": {
-            "required": True,
-            "allow_absent": True,
-            "min_lead_vs": "T2",
-            "min_lead_seconds": 0,
-        },
-        "lead_in_fpr": {
-            "required": True,
-            "allow_absent": True,
-            "max_fraction": 0.02,
-            "min_eval_windows": 4,
-        },
-        "alarm_fatigue": {
-            "required": True,
-            "allow_absent": True,
-            "grid": "serving",
-            "sustain": 1,
-            "max_time_in_alarm_fraction_per_resource": 0.05,
-            "max_fleet_raises_per_week": 10,
-        },
-        "negative_controls_clean": {"required": True, "allow_absent": True},
-        "coverage_integrity": {"required": True},
-        "sanity": {"required": True},
-    },
-}
-
-
-def _write_run_suite_tree(tmp_path: Path, keeper_path: str) -> str:
-    """A runnable two-case suite: a ramp incident with a control, and a pinned alarm.
-
-    The incident capture ramps node-a's cpu 1x to 8x over minutes 400-700 with
-    T0 at the ramp start (06:40) and T2 at 10:00, alongside a healthy control
-    node-ctl. The healthy-reference capture is node-hot at a constant 50x cpu,
-    the wall-to-wall alarm shape. The calibration fleet carries all three
-    resources healthy so every hygiene verdict exists.
-    """
-    suite_dir = tmp_path / "run_suite"
-    (suite_dir / "data").mkdir(parents=True)
-
-    ramp_df, timestamps = gen_capture("node-a", 700, seed=101, ramp=(400, 700, 8.0))
-    control_df, _ = gen_capture("node-ctl", 700, seed=102)
-    write_csv(
-        pd.concat([ramp_df, control_df], ignore_index=True), suite_dir / "data" / "incident.csv"
-    )
-    labels = LabelSet(
-        version=2,
-        capture=None,
-        cases=[
-            LabelCase(
-                resource_id="node-a",
-                role="incident",
-                type="cpu",
-                onsets={"T0": timestamps[400], "T2": timestamps[600]},
-                primary_onset="T0",
-                end=timestamps[699],
-                notes=None,
-            ),
-            LabelCase(
-                resource_id="node-ctl",
-                role="negative_control",
-                type=None,
-                onsets={},
-                primary_onset=None,
-                end=None,
-                notes=None,
-            ),
-        ],
-    )
-    dump_labels(labels, str(suite_dir / "data" / "labels_v2.json"))
-
-    pinned_df, _ = gen_capture("node-hot", 700, seed=103, spike=(0, 700, 50.0))
-    write_csv(pinned_df, suite_dir / "data" / "healthy.csv")
-
-    calibration = pd.concat(
-        [
-            gen_capture(rid, 700, seed=110 + i)[0]
-            for i, rid in enumerate(("node-a", "node-ctl", "node-hot"))
-        ],
-        ignore_index=True,
-    )
-    write_csv(calibration, suite_dir / "data" / "calibration.csv")
-
-    (suite_dir / "rubric.yaml").write_text(yaml.safe_dump(_RUN_RUBRIC))
-    suite = {
-        "version": 1,
-        "suite": "run_suite",
-        "candidate": {"type": "reconstruction", "model": keeper_path, "profile": "aro_node"},
-        "threshold_policy": {
-            "type": "per_resource_margin",
-            "calibration": "data/calibration.csv",
-            "format": "csv",
-            "quantile": 0.99,
-            "margin": 2.0,
-        },
-        "rubric": "rubric.yaml",
-        "cases": [
-            {
-                "name": "ramp_incident",
-                "kind": "incident_capture",
-                "capture": "data/incident.csv",
-                "labels": "data/labels_v2.json",
-                "format": "csv",
-            },
-            {
-                "name": "pinned_alarm",
-                "kind": "healthy_reference",
-                "capture": "data/healthy.csv",
-                "format": "csv",
-            },
-        ],
-    }
-    return _dump_suite(suite_dir, suite)
-
-
 @pytest.fixture(scope="module")
 def run_result(keeper_path: str, tmp_path_factory: pytest.TempPathFactory) -> dict:
     # Module-scoped fixtures run outside the per-test active-profile restore,
@@ -406,7 +278,7 @@ def run_result(keeper_path: str, tmp_path_factory: pytest.TempPathFactory) -> di
     import scry.data.feature_engineering as fe
 
     prev_profile = fe._active_config
-    suite_path = _write_run_suite_tree(tmp_path_factory.mktemp("run"), keeper_path)
+    suite_path = write_run_suite_tree(tmp_path_factory.mktemp("run"), keeper_path)
     result = run_suite(load_suite(suite_path))
     fe._active_config = prev_profile
     return result
@@ -495,12 +367,12 @@ class TestRunSuite:
             return real_evaluate_rubric(rubric, case_metrics)
 
         monkeypatch.setattr(suite_module, "evaluate_rubric", counting)
-        suite_path = _write_run_suite_tree(tmp_path, keeper_path)
+        suite_path = write_run_suite_tree(tmp_path, keeper_path)
         run_suite(load_suite(suite_path))
         assert calls == ["ramp_incident", "pinned_alarm"]
 
     def test_case_names_filter(self, keeper_path: str, tmp_path: Path) -> None:
-        suite_path = _write_run_suite_tree(tmp_path, keeper_path)
+        suite_path = write_run_suite_tree(tmp_path, keeper_path)
         suite = load_suite(suite_path)
         result = run_suite(suite, case_names=["pinned_alarm"])
         assert [case["name"] for case in result["cases"]] == ["pinned_alarm"]
@@ -532,7 +404,7 @@ class TestReport:
                 assert set(gate) == {"name", "required", "passed", "grid", "observed", "detail"}
 
     def test_pass_verdict_and_exit_zero(self, keeper_path: str, tmp_path: Path) -> None:
-        suite_path = _write_run_suite_tree(tmp_path, keeper_path)
+        suite_path = write_run_suite_tree(tmp_path, keeper_path)
         report = run_suite(load_suite(suite_path), case_names=["ramp_incident"])
         assert report["verdict"] == "PASS"
         assert report["exit_code"] == 0
@@ -601,7 +473,7 @@ class TestReport:
         json.dumps(run_result)
 
     def test_determinism_modulo_generated_at(self, keeper_path: str, tmp_path: Path) -> None:
-        suite_path = _write_run_suite_tree(tmp_path, keeper_path)
+        suite_path = write_run_suite_tree(tmp_path, keeper_path)
         first = json.loads(json.dumps(run_suite(load_suite(suite_path))))
         second = json.loads(json.dumps(run_suite(load_suite(suite_path))))
         first["provenance"].pop("generated_at")
