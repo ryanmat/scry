@@ -308,7 +308,33 @@ _RESOURCE_FIELDS = (
 )
 
 
+_TRACKED_RUBRIC = Path(__file__).resolve().parent.parent / "config" / "rubrics" / "aro_node_v1.yaml"
+
+
 class TestRunSuite:
+    def test_tracked_rubric_can_evaluate_a_mixed_suite(
+        self, keeper_path: str, tmp_path: Path
+    ) -> None:
+        """The shipped rubric must be runnable on the case kinds it describes.
+
+        A required gate whose population is empty raises SpecError unless the
+        gate declares allow_absent, and the kind-scoped gates are empty on the
+        kind they do not apply to: the detection gates on a healthy reference,
+        alarm_fatigue on an incident. Without allow_absent the tracked rubric
+        evaluates no suite at all, which would make the harness unusable with
+        the very rubric it ships.
+        """
+        suite = load_suite(write_run_suite_tree(tmp_path, keeper_path))
+        suite["rubric"] = str(_TRACKED_RUBRIC)
+
+        report = run_suite(suite)
+
+        assert {case["kind"] for case in report["cases"]} == {"incident", "healthy_reference"}
+        for case in report["cases"]:
+            names = {gate["name"] for gate in case["rubric"]["gates"]}
+            assert "alarm_fatigue" in names
+            assert "no_pre_onset_bridging" in names
+
     def test_one_case_entry_per_case_on_every_declared_grid(self, run_result: dict) -> None:
         assert [case["name"] for case in run_result["cases"]] == ["ramp_incident", "pinned_alarm"]
         incident, healthy = run_result["cases"]

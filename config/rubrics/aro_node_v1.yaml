@@ -20,18 +20,30 @@ headline_grid: serving       # reading convention declared before the phase-4
 
 # Each gate: required plus optional allow_absent, grid, and parameters. A gate
 # evaluates on headline_grid unless it declares its own grid.
+#
+# The kind-scoped gates carry allow_absent because a required gate whose target
+# population is empty is a spec error otherwise, and each of them is empty on
+# the case kind it does not describe: the detection gates and the controls gate
+# on a healthy reference, alarm_fatigue on an incident (its population is the
+# resources carrying a time-in-alarm fraction, which incident-role and
+# control-role resources do not). Without it this rubric evaluates no suite at
+# all. allow_absent is scoped per gate, so a gate still evaluates wherever its
+# population exists; it is not a way to skip a gate that has data.
 gates:
-  no_pre_onset_bridging: {required: true}
+  no_pre_onset_bridging: {required: true, allow_absent: true}
   detection_lead:
     required: true
+    allow_absent: true       # absent on healthy-reference cases
     min_lead_vs: T2
     min_lead_seconds: 0      # any positive lead vs the reference alarm onset
   lead_in_fpr:
     required: true
+    allow_absent: true       # no onset means no lead-in window to score
     max_fraction: 0.02
     min_eval_windows: 150    # a gate on an underpowered lead-in is vacuous
   alarm_fatigue:             # evaluated on healthy-reference cases, deployed config
     required: true
+    allow_absent: true       # absent on incident cases
     grid: serving
     sustain: 1
     max_time_in_alarm_fraction_per_resource: 0.05   # v1 default, owner-tunable
@@ -39,6 +51,7 @@ gates:
   negative_controls_clean:
     required: true           # zero sustained runs on control resources at their
                              # own resolved thresholds
+    allow_absent: true       # absent when a case declares no control
   coverage_integrity:
     required: true           # every non-excluded resource passes hygiene with
                              # empty reasons

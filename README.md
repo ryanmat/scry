@@ -73,6 +73,7 @@ Full walkthrough: [examples/quickstart.md](examples/quickstart.md).
 
 - [Architecture](docs/architecture.md): the model, the data seam, and how the pieces fit together.
 - [Data contract](docs/data-contract.md): the canonical metric schema.
+- [Evaluation](docs/evaluation.md): suites, rubrics, and the report the harness writes.
 - [Ingestion](docs/ingestion.md): the object store and the routes that land data in it.
 - [Roadmap](docs/roadmap.md): where Scry is headed.
 - [Training](docs/training.md): training locally or on your own orchestrator.
