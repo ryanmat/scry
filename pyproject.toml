@@ -88,3 +88,14 @@ python_version = "3.10"
 warn_return_any = true
 warn_unused_ignores = true
 disallow_untyped_defs = true
+
+# torch on Linux comes from the PyTorch CPU index: the PyPI wheel drags fifteen nvidia packages
+# (4.5 GB installed) onto hosts that have no NVIDIA device, and every Linux host that runs scry
+# is one of those. macOS and Windows keep the PyPI wheel.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
