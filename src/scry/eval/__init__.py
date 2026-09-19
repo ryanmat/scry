@@ -50,6 +50,7 @@ from scry.eval.rubric import (
     evaluate_rubric,
     load_rubric,
 )
+from scry.eval.sweep import compute_baselines
 
 # name -> source module, resolved on first access by __getattr__ below.
 _LAZY_EXPORTS: dict[str, str] = {
@@ -118,6 +119,7 @@ __all__ = [
     "ThresholdPolicy",
     "anomaly_runs",
     "build_provenance",
+    "compute_baselines",
     "compute_case_metrics",
     "dump_labels",
     "evaluate_rubric",
