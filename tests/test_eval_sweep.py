@@ -27,11 +27,19 @@ baselines so swapping either moves the credited time, the no-bridging rule
 that a pre-onset run is never credited, the three DESIGN-addendum caveats, the
 provenance block's empty rubric and case paths beside the MarginSweep policy,
 and the ValueError for an incident resource with no capture windows.
+
+``scripts/sweep_margin.py`` is pinned end to end as an operator runs it: a real
+subprocess against the tiny keeper writes a results JSON that satisfies the
+same structural contract, ``--quantile`` and ``--sustain`` default to 0.99 and
+3 but are the values that reach the sweep when given, and the script text
+carries no ``sys.path`` mutation and no hardcoded path.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
+import re
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -486,6 +494,148 @@ class TestRunSweep:
         # node-b has healthy baselines but no capture windows to detect over.
         with pytest.raises(ValueError, match="no capture windows.*'node-b'"):
             _sweep(tmp_path, uncaptured="node-b")
+
+
+REPO = Path(__file__).resolve().parents[1]
+SWEEP_SCRIPT = REPO / "scripts" / "sweep_margin.py"
+
+# Spec 11: the results JSON carries exactly these top-level keys.
+CONTRACT_KEYS = {
+    "provenance", "grid", "quantile", "sustain", "margins",
+    "per_resource_baselines", "arm_baselines", "arms", "detection", "caveats",
+}
+
+
+def _run_cli(inputs: dict[str, str], *extra: str, output: str) -> subprocess.CompletedProcess[str]:
+    """The sweep CLI as an operator runs it, over the shared synthetic inputs."""
+    return subprocess.run(
+        [
+            sys.executable, str(SWEEP_SCRIPT),
+            "--model", inputs["model"],
+            "--healthy", inputs["healthy"],
+            "--capture", inputs["capture"],
+            "--labels", inputs["labels"],
+            "--profile", "aro_node",
+            "--margins", "1.5,2.0",
+            *extra,
+            "--output", output,
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO,
+    )
+
+
+@pytest.fixture(scope="module")
+def sweep_inputs(keeper_path: str, tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
+    """A healthy week, a spiked capture of the same resource, and its labels sidecar.
+
+    900 one-minute samples leave 88 windows on the serving grid, enough for the
+    gapped split (gap = seq_len = 30 windows) to leave a held-out half.
+    """
+    from synth import gen_capture, write_csv
+
+    from scry.eval.labels import LabelCase, LabelSet, dump_labels
+
+    tmp = tmp_path_factory.mktemp("sweep_cli")
+    healthy_df, _ = gen_capture("node-a", 900, seed=201)
+    capture_df, ends = gen_capture("node-a", 900, seed=202, spike=(500, 560, 6.0))
+    labels = tmp / "labels.json"
+    onsets = {"T0": ends[500], "T2": ends[560]}
+    dump_labels(
+        LabelSet(
+            version=2,
+            capture=None,
+            cases=[LabelCase("node-a", "incident", "cpu", onsets, "T0", ends[899], None)],
+        ),
+        str(labels),
+    )
+    return {
+        "model": keeper_path,
+        "healthy": write_csv(healthy_df, tmp / "healthy.csv"),
+        "capture": write_csv(capture_df, tmp / "capture.csv"),
+        "labels": str(labels),
+        "output": str(tmp / "sweep.json"),
+    }
+
+
+@pytest.fixture(scope="module")
+def sweep_run(sweep_inputs: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """The step's invocation verbatim: no --quantile and no --sustain, so both default."""
+    return _run_cli(sweep_inputs, output=sweep_inputs["output"])
+
+
+@pytest.fixture(scope="module")
+def sweep_payload(
+    sweep_run: subprocess.CompletedProcess[str], sweep_inputs: dict[str, str]
+) -> dict[str, Any]:
+    assert sweep_run.returncode == 0, sweep_run.stderr
+    return json.loads(Path(sweep_inputs["output"]).read_text())
+
+
+class TestSweepMarginCLI:
+    def test_cli_writes_a_contract_shaped_results_json(
+        self,
+        sweep_run: subprocess.CompletedProcess[str],
+        sweep_payload: dict[str, Any],
+        sweep_inputs: dict[str, str],
+    ) -> None:
+        from scry.eval.sweep import ARM_BASELINES, CAVEATS
+
+        assert sweep_run.returncode == 0, sweep_run.stderr
+        assert sweep_inputs["output"] in sweep_run.stdout
+
+        assert set(sweep_payload) == CONTRACT_KEYS
+        assert sweep_payload["arm_baselines"] == ARM_BASELINES
+        assert sweep_payload["caveats"] == list(CAVEATS)
+        assert sweep_payload["margins"] == [1.5, 2.0]
+        assert set(sweep_payload["per_resource_baselines"]) == {"node-a"}
+        assert set(sweep_payload["arms"]) == {
+            "healthy_holdout", "healthy_insample", "capture_day",
+        }
+        assert all(set(arm) == {"1.5", "2.0"} for arm in sweep_payload["arms"].values())
+        # Detection at BOTH baselines, per margin, for the labeled resource.
+        assert set(sweep_payload["detection"]) == {"detection_at_deploy", "detection_at_fit"}
+        assert set(sweep_payload["detection"]["detection_at_fit"]["1.5"]) == {"node-a"}
+        # The sweep scores the deployed refresh emulated offline.
+        assert sweep_payload["grid"]["label"] == "serving-10min"
+        # run_sweep is handed frames, so the CLI holding the paths records them:
+        # the results file self-identifies its three inputs.
+        cases = sweep_payload["provenance"]["cases"]
+        assert {name: entry["data_path"] for name, entry in cases.items()} == {
+            "healthy": sweep_inputs["healthy"],
+            "capture": sweep_inputs["capture"],
+            "labels": sweep_inputs["labels"],
+        }
+
+    def test_quantile_and_sustain_default_unless_given(
+        self, sweep_payload: dict[str, Any], sweep_inputs: dict[str, str], tmp_path: Path
+    ) -> None:
+        # The run above passed neither flag, so these are the declared defaults.
+        assert sweep_payload["quantile"] == 0.99
+        assert sweep_payload["sustain"] == 3
+
+        # Given, they are the values that reach the sweep, not decoration.
+        output = tmp_path / "explicit.json"
+        proc = _run_cli(
+            sweep_inputs, "--quantile", "0.5", "--sustain", "1", output=str(output)
+        )
+
+        assert proc.returncode == 0, proc.stderr
+        explicit = json.loads(output.read_text())
+        assert explicit["quantile"] == 0.5
+        assert explicit["sustain"] == 1
+
+    def test_script_has_no_sys_path_mutation_and_no_hardcoded_paths(self) -> None:
+        text = SWEEP_SCRIPT.read_text()
+
+        assert "sys.path" not in text
+        # Nothing anchored to one machine or one checkout: no absolute or
+        # home-relative literal, and not the untracked capture dir the
+        # original sweep lived in.
+        assert not re.search(r"""["'](/|~/)""", text)
+        assert "data/captures" not in text
+        assert str(REPO) not in text
 
 
 class TestExportsAndTorchFree:
