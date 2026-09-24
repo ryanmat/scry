@@ -252,15 +252,25 @@ def _detect(
     *,
     threshold: float,
     onset: pd.Timestamp,
+    end: pd.Timestamp,
     sustain: int,
 ) -> dict[str, Any]:
     """One resource's no-bridging detection verdict, as JSON-ready fields.
 
-    The scan is the resource's entire scored capture -- the sweep asks when the
-    threshold would have fired, with no lead-time horizon clamp.
+    The scan starts at the resource's first scored capture window -- the sweep
+    asks when the threshold would have fired, with no lead-time horizon clamp
+    -- and is BOUNDED at the case's labeled ``end``, keeping the windows whose
+    end time is at or before it exactly as the suite's scan does (``ends <=
+    case.end``, ``scry.eval.metrics``). A run is therefore measured within the
+    labeled window, and an excursion after the incident is over is never
+    credited as its detection.
     """
-    spans = [(end_times[i], end_times[j]) for i, j in anomaly_runs(errors > threshold, sustain)]
-    verdict = select_detection(spans, end_times, onset, DETECTION_MODE)
+    scanned = end_times <= end
+    scan_ends = end_times[scanned]
+    spans = [
+        (scan_ends[i], scan_ends[j]) for i, j in anomaly_runs(errors[scanned] > threshold, sustain)
+    ]
+    verdict = select_detection(spans, scan_ends, onset, DETECTION_MODE)
     moment = verdict.detection_time
     return {
         "detected": verdict.detected,
@@ -291,7 +301,8 @@ def run_sweep(
     half shares no raw samples with the fit half; the rate arms come from
     ``sweep_arms``; detection is reported for every labeled incident at BOTH
     baselines, per margin, anchored at the case's ``primary_onset`` (falling
-    back to ``T0``).
+    back to ``T0``) and scanned only to the case's labeled ``end``, as the
+    suite's scan is.
 
     Args:
         candidate: The scorer; its ScoreSet meta supplies the model path,
@@ -338,14 +349,14 @@ def run_sweep(
 
     # Anchors first: an incident with no capture windows is an error whatever
     # the margins are, not a silently empty detection entry.
-    anchors: dict[str, pd.Timestamp] = {}
+    anchors: dict[str, tuple[pd.Timestamp, pd.Timestamp]] = {}
     for case in labels.incidents():
         if case.resource_id not in capture_by_resource:
             raise ValueError(
                 f"no capture windows for incident resource {case.resource_id!r}; "
                 f"the capture covers {sorted(capture_by_resource)}"
             )
-        anchors[case.resource_id] = case.onsets[case.primary_onset or "T0"]
+        anchors[case.resource_id] = (case.onsets[case.primary_onset or "T0"], case.end)
 
     detection: dict[str, dict[str, dict[str, Any]]] = {}
     for arm in DETECTION_ARMS:
@@ -355,9 +366,10 @@ def run_sweep(
                     *capture_by_resource[rid],
                     threshold=float(margin) * _threshold(per_resource_baselines, rid, arm),
                     onset=onset,
+                    end=end,
                     sustain=sustain,
                 )
-                for rid, onset in anchors.items()
+                for rid, (onset, end) in anchors.items()
             }
             for margin in margins
         }
