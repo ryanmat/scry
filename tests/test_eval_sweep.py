@@ -24,9 +24,11 @@ boundary leak that an ungapped split would count.
 errors outright: the spec-11 top-level key set (``arms`` equal to
 ``sweep_arms``, the gap read from the ScoreSet meta), detection at BOTH
 baselines so swapping either moves the credited time, the no-bridging rule
-that a pre-onset run is never credited, the three DESIGN-addendum caveats, the
-provenance block's empty rubric and case paths beside the MarginSweep policy,
-and the ValueError for an incident resource with no capture windows.
+that a pre-onset run is never credited, the scan bounded at the case's labeled
+end as the suite's scan is (a run after the end is not credited; one ending
+exactly at it still is), the three DESIGN-addendum caveats, the provenance
+block's empty rubric and case paths beside the MarginSweep policy, and the
+ValueError for an incident resource with no capture windows.
 
 ``scripts/sweep_margin.py`` is pinned end to end as an operator runs it: a real
 subprocess against the tiny keeper writes a results JSON that satisfies the
@@ -282,6 +284,18 @@ def _capture_day() -> tuple[np.ndarray, pd.DatetimeIndex]:
 CAPTURE = _capture_day()
 
 
+def _spiked_capture(first: int) -> tuple[np.ndarray, pd.DatetimeIndex]:
+    """CAPTURE's hourly grid, flat at 0.5 but for one 2.5 run of three windows.
+
+    2.5 clears every threshold HEALTHY yields at the margins these tests pass
+    (q_fit 1.0, q_deploy 2.0), so WHERE the run lands is the only thing under
+    test.
+    """
+    errors = np.full(len(CAPTURE[1]), 0.5)
+    errors[first : first + 3] = 2.5
+    return errors, CAPTURE[1]
+
+
 def _frame(series: dict[str, tuple[np.ndarray, pd.DatetimeIndex]]) -> pd.DataFrame:
     """A capture frame whose ``value`` column IS the error the stub scores back out."""
     return pd.DataFrame(
@@ -319,11 +333,14 @@ class StatedErrors:
 def _sweep(
     tmp_path: Path, *, margins: Sequence[float] = (1.0,), primary: str | None = "T0",
     seq_len: int = 4, uncaptured: str | None = None,
+    capture: tuple[np.ndarray, pd.DatetimeIndex] = CAPTURE, end_index: int = -1,
 ) -> dict[str, Any]:
     """run_sweep over HEALTHY and CAPTURE for node-a, T0 at 06:00 and T2 at 12:00.
 
     ``uncaptured`` names a second incident resource added to the healthy week
-    and the labels but NOT to the capture frame.
+    and the labels but NOT to the capture frame. ``capture`` replaces the
+    scored capture day and ``end_index`` picks the case's labeled end out of
+    its hourly ends (the last window by default).
     """
     from scry.eval.labels import LabelCase, LabelSet
     from scry.eval.scoring import ScoringGrid
@@ -331,17 +348,18 @@ def _sweep(
 
     model = tmp_path / "keeper.pt"
     model.write_bytes(b"keeper")
-    ends = CAPTURE[1]
+    ends = capture[1]
     resources = ["node-a"] + ([uncaptured] if uncaptured is not None else [])
     onsets = {"T0": ends[6], "T2": ends[12]}
     # LabelCase fields: resource_id, role, type, onsets, primary_onset, end, notes.
     cases = [
-        LabelCase(rid, "incident", "cpu", onsets, primary, ends[-1], None) for rid in resources
+        LabelCase(rid, "incident", "cpu", onsets, primary, ends[end_index], None)
+        for rid in resources
     ]
     return run_sweep(
         StatedErrors(str(model), seq_len=seq_len),
         _frame({rid: HEALTHY for rid in resources}),
-        _frame({"node-a": CAPTURE}),
+        _frame({"node-a": capture}),
         LabelSet(version=2, capture=None, cases=cases),
         list(margins),
         quantile=0.99,
@@ -455,6 +473,40 @@ class TestRunSweep:
         assert result["per_resource_baselines"]["node-b"]["q_fit"] == pytest.approx(2.0)
         assert at_fit["node-a"]["detection_time"] == "2026-01-02T08:00:00Z"
         assert at_fit["node-b"]["detection_time"] == "2026-01-02T14:00:00Z"
+
+    def test_run_after_the_labeled_end_is_not_credited(self, tmp_path: Path) -> None:
+        # The case ends at 12:00 and the capture's only over-threshold run is
+        # 14:00-16:00, after the incident is over. The suite's detection scan
+        # keeps windows with ends <= case.end (src/scry/eval/metrics.py) and so
+        # does the sweep's, so that run is credited at no arm and no margin.
+        detection = _sweep(
+            tmp_path, margins=[1.0, 1.2], capture=_spiked_capture(14), end_index=12
+        )["detection"]
+
+        assert set(detection) == {"detection_at_deploy", "detection_at_fit"}
+        for arm, by_margin in detection.items():
+            assert set(by_margin) == {"1.0", "1.2"}
+            for margin, at_margin in by_margin.items():
+                verdict = at_margin["node-a"]
+                assert verdict["detected"] is False, (arm, margin)
+                assert verdict["n_runs_at_or_after"] == 0, (arm, margin)
+                assert verdict["detection_time"] is None, (arm, margin)
+
+    def test_run_inside_the_labeled_window_is_credited(self, tmp_path: Path) -> None:
+        # The same capture with that run moved to 10:00-12:00, between the
+        # primary onset (06:00) and the 12:00 end. The bound is inclusive as
+        # the suite's is, so the window ending exactly at case.end is kept and
+        # the run still holds its three windows.
+        detection = _sweep(
+            tmp_path, margins=[1.0, 1.2], capture=_spiked_capture(10), end_index=12
+        )["detection"]
+
+        for arm, by_margin in detection.items():
+            for margin, at_margin in by_margin.items():
+                verdict = at_margin["node-a"]
+                assert verdict["detected"] is True, (arm, margin)
+                assert verdict["n_runs_at_or_after"] == 1, (arm, margin)
+                assert verdict["detection_time"] == "2026-01-02T10:00:00Z", (arm, margin)
 
     def test_caveats_embed_the_three_design_statements(self, tmp_path: Path) -> None:
         from scry.eval.sweep import CAVEATS
