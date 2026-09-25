@@ -13,11 +13,13 @@ windows into alerts -- so its base is held tighter than the growth base.
 the global threshold riding as ``resource_id=None``. It returns the value that
 is kept beside the ``GuardVerdict`` that records the decision. A proposal
 inside the band is ``accepted`` and kept; one outside it is ``REJECTED-grew``
-or ``REJECTED-shrank`` and the previous value is kept instead. Every verdict
-carries ``old``, ``proposed``, the observed ``ratio``, and the ``limit`` that
-ratio was measured against -- the grow limit for a value that grew, the shrink
-floor for one that shrank -- so a report reader can re-derive the decision
-from the verdict alone.
+or ``REJECTED-shrank`` and the previous value is kept instead. A non-finite
+proposal never reaches the band at all: it is ``REJECTED-nonfinite``, because
+every band comparison against a NaN is False and an unguarded band would
+therefore accept it and serve it. Every verdict carries ``old``, ``proposed``,
+the observed ``ratio``, and the ``limit`` that ratio was measured against --
+the grow limit for a value that grew, the shrink floor for one that shrank --
+so a report reader can re-derive the decision from the verdict alone.
 
 Age is not read here: callers pass ``weeks`` already anchored and floored (one
 day, i.e. ``weeks = 1/7``, is the youngest band a rebake ever claims). Pure
@@ -26,6 +28,7 @@ arithmetic, no I/O and no clock.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 MAX_WEEKLY_GROWTH: float = 1.5
@@ -37,6 +40,7 @@ MAX_WEEKLY_SHRINK: float = 1.35
 VERDICT_ACCEPTED = "accepted"
 VERDICT_REJECTED_GREW = "REJECTED-grew"
 VERDICT_REJECTED_SHRANK = "REJECTED-shrank"
+VERDICT_REJECTED_NONFINITE = "REJECTED-nonfinite"
 
 
 @dataclass(frozen=True)
@@ -81,8 +85,20 @@ def guard_value(
         ``(kept, verdict)``: the value that stays in force -- ``proposed`` when
         it is inside the band, ``old`` when it is not -- and the
         ``GuardVerdict`` recording old, proposed, ratio, and the limit that
-        ratio was measured against. A ratio exactly on a bound is accepted.
+        ratio was measured against. A ratio exactly on a bound is accepted. A
+        non-finite ``proposed`` is ``REJECTED-nonfinite`` with ``old`` kept and
+        no ratio or limit, since no band comparison was made.
     """
+    if not math.isfinite(proposed):
+        return old, GuardVerdict(
+            resource_id=resource_id,
+            verdict=VERDICT_REJECTED_NONFINITE,
+            old=old,
+            proposed=proposed,
+            ratio=None,
+            limit=None,
+        )
+
     ratio = proposed / old
     grow_limit = max_weekly_growth**weeks
     shrink_floor = 1.0 / (max_weekly_shrink**weeks)

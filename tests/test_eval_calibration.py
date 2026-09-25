@@ -14,10 +14,17 @@ is pinned as the regression it is: ratio 2.158 over the 1.5 band, so the
 verdict is ``REJECTED-grew`` and the previous value is what the guard keeps.
 Each verdict kind is pinned on one value, with both rejected kinds keeping the
 old value, and ``GuardVerdict`` is pinned to the spec's fields, frozen.
+
+The band's edges are pinned too: a ratio sitting exactly on either bound is
+inside the band, both bases are parameters rather than welded-in constants, and
+a non-finite proposal -- which would otherwise slip past two ``ratio``
+comparisons that are False for NaN and be kept as the serving threshold -- is
+rejected with the old value kept.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import fields
 
 import pytest
@@ -69,6 +76,39 @@ class TestBandMath:
         assert round(outside.limit, 6) == 1.059634
         assert outside.verdict == "REJECTED-grew"
         assert guard_value(None, 0.2, 0.22, 1.0)[1].verdict == "accepted"
+
+
+class TestBandEdges:
+    def test_ratio_exactly_on_either_bound_is_accepted(self) -> None:
+        # The band is closed at both ends: the documented maximum move is by
+        # definition still within the documented band. At one week of age the
+        # bounds are exactly 1.5 and exactly 1 / 1.35, so these two proposals
+        # land on them with no floating-point slack, and both are kept.
+        kept_grown, on_grow_limit = guard_value("node-a", 1.0, 1.5, 1.0)
+        kept_shrunk, on_shrink_floor = guard_value("node-a", 1.0, 1.0 / 1.35, 1.0)
+
+        assert on_grow_limit.ratio == 1.5 == on_grow_limit.limit
+        assert on_grow_limit.verdict == "accepted"
+        assert kept_grown == 1.5
+
+        assert on_shrink_floor.ratio == 1.0 / 1.35 == on_shrink_floor.limit
+        assert on_shrink_floor.verdict == "accepted"
+        assert kept_shrunk == 1.0 / 1.35
+
+    def test_shrink_base_is_a_parameter(self) -> None:
+        # Mirror of the growth-base case above: a caller widening the shrink
+        # base to 2.0 at one week of age gets a floor of 0.5, so a 0.6x
+        # proposal is inside the band -- while the default 1.35 base, whose
+        # floor is 1 / 1.35 == 0.7407..., rejects the same proposal.
+        kept, widened = guard_value("node-a", 1.0, 0.6, 1.0, max_weekly_shrink=2.0)
+        kept_default, default = guard_value("node-a", 1.0, 0.6, 1.0)
+
+        assert widened.verdict == "accepted"
+        assert widened.limit == pytest.approx(0.5)
+        assert kept == 0.6
+
+        assert default.verdict == "REJECTED-shrank"
+        assert kept_default == 1.0
 
 
 class TestUnguardedGlobalPin:
@@ -123,3 +163,21 @@ class TestVerdictKinds:
 
         with pytest.raises(AttributeError):
             verdict.verdict = "accepted"  # type: ignore[misc]
+
+
+class TestNonFiniteProposals:
+    @pytest.mark.parametrize("proposed", [math.nan, math.inf, -math.inf])
+    def test_non_finite_proposal_is_rejected_and_old_kept(self, proposed: float) -> None:
+        # A non-finite proposal has no ratio to compare: every band comparison
+        # against NaN is False, so an unguarded band accepts it and a NaN goes
+        # on to serve as the threshold. It is a rejection, and the old value is
+        # what stays in force.
+        kept, verdict = guard_value("node-a", 0.2, proposed, 1.0)
+
+        assert kept == 0.2
+        assert verdict.verdict == "REJECTED-nonfinite"
+        assert verdict.resource_id == "node-a"
+        assert verdict.old == 0.2
+        assert verdict.proposed == pytest.approx(proposed, nan_ok=True)
+        assert verdict.ratio is None  # no band comparison was made
+        assert verdict.limit is None
