@@ -26,16 +26,27 @@ rides the same band as the per-resource map (the measured jump is rejected
 through the composed path too, not only through ``guard_value``), and
 ``--allow-drift`` bypasses the band -- and only the band -- with stamped
 verdicts.
+
+Upstream of all of it, ``resolve_old_thresholds`` decides what ``old`` even is.
+The measured 2026-07-28 vacuous first bake -- an empty serving per_resource map,
+every proposal accepted as new, exit 0 -- is pinned as the spec error it should
+have been, and so is every current value that cannot serve as a band's ``old``:
+a NaN one turns the band off, an infinite one keeps itself in force forever, a
+zero one divides by zero. Each resolves through an explicit seed, in either
+accepted form, or the run stops naming ``--seed`` and the key it wanted.
 """
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import fields
+from pathlib import Path
 
 import pytest
 
-from scry.eval.calibration import GuardVerdict, check_guards, guard_value
+from scry.eval.calibration import GuardVerdict, check_guards, guard_value, resolve_old_thresholds
+from scry.eval.rubric import SpecError
 
 ONE_DAY_IN_WEEKS = 1.0 / 7.0
 """The age floor of one day expressed in weeks: ``max(age, 1 day) / 7``."""
@@ -48,6 +59,54 @@ OLD_PER_RESOURCE = {"node-a": 0.20, "node-b": 0.20, "node-c": 0.20}
 
 NEW_PER_RESOURCE = {"node-a": 0.24, "node-b": 0.40, "node-c": 0.10}
 """Proposals at ratios 1.2 (accepted), 2.0 (over 1.5), and 0.5 (under 0.7407)."""
+
+SEED_GLOBAL = 0.19
+"""The global threshold the seed fixtures carry, distinct from every current one."""
+
+SEED_PER_RESOURCE = {"node-a": 0.21, "node-b": 0.22}
+"""The per-resource map the seed fixtures carry, distinct from every current one."""
+
+USABLE_A = {"node-a": 0.20}
+"""A current per-resource map the band can measure against, needing no seed."""
+
+
+def _write_seed(
+    tmp_path: Path,
+    form: str,
+    *,
+    global_threshold: float = SEED_GLOBAL,
+    per_resource: dict[str, float] | None = None,
+) -> str:
+    """Write a seed in one of the two accepted forms and return its path.
+
+    ``"checkpoint"`` is a checkpoint whose serving block carries ``threshold``
+    and a non-empty ``per_resource`` map -- the same block ``ServingBlock``
+    reads; ``"json"`` is the ``{"global", "per_resource"}`` map.
+    """
+    if per_resource is None:
+        per_resource = SEED_PER_RESOURCE
+    if form == "json":
+        path = tmp_path / "seed.json"
+        path.write_text(json.dumps({"global": global_threshold, "per_resource": per_resource}))
+        return str(path)
+
+    import torch  # local: the test module, like calibration.py, stays torch-free to import
+
+    path = tmp_path / "seed.pt"
+    torch.save({"serving": {"threshold": global_threshold, "per_resource": per_resource}}, path)
+    return str(path)
+
+
+# One case per unusable kind: the current serving block, and the key it leaves
+# with no usable previous value. The other key of each case is usable.
+UNUSABLE_CURRENT_VALUES = [
+    pytest.param({"threshold": math.nan, "per_resource": USABLE_A}, "global", id="nan-global"),
+    pytest.param({"per_resource": USABLE_A}, "global", id="absent-global"),
+    pytest.param({"threshold": 0.30, "per_resource": {"node-a": math.inf}}, "node-a", id="inf"),
+    pytest.param({"threshold": 0.30, "per_resource": {"node-a": 0.0}}, "node-a", id="zero"),
+    pytest.param({"threshold": 0.30, "per_resource": {"node-a": -0.2}}, "node-a", id="negative"),
+    pytest.param({"threshold": 0.30}, "node-a", id="new-to-the-bake"),
+]
 
 
 class TestBandMath:
@@ -302,6 +361,102 @@ class TestCheckGuards:
         # The composition records the proposal verbatim, NaN included, exactly
         # as guard_value does: a report writer still owns the JSON encoding.
         assert math.isnan(by_resource[None].proposed)
+
+
+class TestSeedResolution:
+    def test_vacuous_first_bake_without_a_seed_is_a_spec_error(self) -> None:
+        # The measured 2026-07-28 failure: with an empty serving per_resource
+        # map every proposal was accepted as new and the run exited 0, shipping
+        # an excursion-baked 0.3766 for lp7tj and a pinned-state 1.0124 for
+        # master-2. An unguarded first bake is an error, not a default: the
+        # resolution stops here, so nothing downstream runs.
+        with pytest.raises(SpecError) as excinfo:
+            resolve_old_thresholds({"threshold": 0.30, "per_resource": {}}, ["node-a", "node-b"])
+
+        assert "--seed" in str(excinfo.value)
+        assert "node-a" in str(excinfo.value)
+
+    @pytest.mark.parametrize("form", ["checkpoint", "json"])
+    def test_a_seed_in_either_form_resolves_the_old_inputs(self, tmp_path: Path, form: str) -> None:
+        # The two accepted seed forms carry the same two things -- a global
+        # threshold and a non-empty per-resource map -- and resolve identically
+        # into the (old_global, old) that check_guards takes.
+        old_global, old = resolve_old_thresholds(
+            {"per_resource": {}},
+            ["node-a", "node-b"],
+            seed_path=_write_seed(tmp_path, form),
+        )
+
+        assert old_global == SEED_GLOBAL
+        assert old == SEED_PER_RESOURCE
+
+    @pytest.mark.parametrize(("serving", "key"), UNUSABLE_CURRENT_VALUES)
+    def test_an_unusable_current_value_needs_the_seed_or_stops_the_run(
+        self, tmp_path: Path, serving: dict, key: str
+    ) -> None:
+        # guard_value finiteness-checks the proposal only, so a NaN old turns
+        # the band off, an infinite old keeps itself in force forever and a zero
+        # old divides by zero; a negative one is no threshold at all, and a
+        # resource new to the bake has nothing to measure against. Each counts
+        # as missing: the seed's value becomes the old, while the key that was
+        # usable keeps its current value -- the seed is a fallback, not an
+        # override. With no seed the run stops on the typed spec error, naming
+        # the flag that fixes it and the key it wanted, so an operator can act
+        # on the message without reading the serving block.
+        seeded_a = {"node-a": SEED_PER_RESOURCE["node-a"]}  # node-b is seeded but unneeded
+        expected = (SEED_GLOBAL, USABLE_A) if key == "global" else (0.30, seeded_a)
+
+        seeded = resolve_old_thresholds(
+            serving, ["node-a"], seed_path=_write_seed(tmp_path, "json")
+        )
+        with pytest.raises(SpecError) as excinfo:
+            resolve_old_thresholds(serving, ["node-a"])
+
+        assert seeded == expected
+        assert "--seed" in str(excinfo.value)
+        assert key in str(excinfo.value)
+
+    def test_a_seed_without_the_key_is_the_same_spec_error(self, tmp_path: Path) -> None:
+        # A seed is not a free pass over the requirement: it has to carry the
+        # key that is missing. One that covers node-b does nothing for node-a.
+        seed_path = _write_seed(tmp_path, "json", per_resource={"node-b": 0.22})
+
+        with pytest.raises(SpecError) as excinfo:
+            resolve_old_thresholds(
+                {"threshold": 0.30, "per_resource": {}}, ["node-a"], seed_path=seed_path
+            )
+
+        assert "--seed" in str(excinfo.value)
+        assert "node-a" in str(excinfo.value)
+
+    def test_an_unusable_seed_value_is_the_same_spec_error(self, tmp_path: Path) -> None:
+        # What is resolved is a usable value, not a present key: a seed global
+        # of 0.0 would divide by zero in the band exactly as a serving 0.0
+        # would, so it is refused on the same terms.
+        seed_path = _write_seed(tmp_path, "json", global_threshold=0.0)
+
+        with pytest.raises(SpecError) as excinfo:
+            resolve_old_thresholds(
+                {"per_resource": {"node-a": 0.20}}, ["node-a"], seed_path=seed_path
+            )
+
+        assert "--seed" in str(excinfo.value)
+        assert "global" in str(excinfo.value)
+
+    def test_serving_resources_the_bake_did_not_propose_are_carried(self) -> None:
+        # check_guards takes the whole previous map, not only the keys the bake
+        # proposed: node-z, dropped by this capture, is an omission for the
+        # report to record, and dropping it here would hide it. Nothing needs a
+        # seed when every current value is usable. What does not survive is an
+        # unusable entry -- every value in the resolved map is one the band
+        # could measure against -- and node-y has no proposal to guard anyway.
+        old_global, old = resolve_old_thresholds(
+            {"threshold": 0.30, "per_resource": {"node-a": 0.20, "node-z": 0.25, "node-y": 0.0}},
+            ["node-a"],
+        )
+
+        assert old_global == 0.30
+        assert old == {"node-a": 0.20, "node-z": 0.25}
 
 
 class TestPackageExports:

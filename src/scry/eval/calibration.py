@@ -27,19 +27,33 @@ ship wholesale while only per-resource entries met the band, and the measured
 2026-07-28 jump 0.193205 -> 0.417031 landed above the serving grid's peak on
 the one threshold the POST endpoint actually resolves.
 
+``resolve_old_thresholds`` runs upstream of both and answers what ``old`` is.
+A value the band can measure against has to be present, finite, and positive;
+anything else -- an empty serving map on a first bake, a NaN that turns the band
+off, an infinity that keeps itself in force forever, a zero that divides by
+zero, a negative that is no threshold at all -- counts as missing and must be
+supplied by an explicit ``--seed``. Absent that, the run is a spec error rather
+than an unguarded bake. That resolution is the only I/O in this module (it reads
+the seed file); the guard itself stays pure.
+
 Age is not read here: callers pass ``weeks`` already anchored and floored (one
 day, i.e. ``weeks = 1/7``, is the youngest band a rebake ever claims). Pure
-arithmetic, no I/O and no clock.
+arithmetic, no clock.
 """
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from scry.eval.rubric import SpecError
+
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
+    from typing import Any
 
     from scry.eval.hygiene import ResourceEligibility
 
@@ -242,3 +256,121 @@ def check_guards(
         verdicts.append(verdict)
 
     return kept_global, kept, verdicts
+
+
+def _usable(value: float | None) -> float | None:
+    """``value`` as a previous threshold the band can measure against, else ``None``.
+
+    Usable means present, finite, and strictly positive. The band divides by
+    the previous value and compares the ratio, so a NaN turns every comparison
+    False and accepts whatever was proposed, an infinity can never be moved off
+    by any finite proposal, and a zero divides by zero; a negative threshold is
+    not a reconstruction error to begin with. Each of those counts as missing.
+
+    Args:
+        value: The recorded value, or ``None`` where the map had no entry. A
+            number or ``None``; anything else raises ``TypeError`` at ``float``.
+    """
+    if value is None:
+        return None
+    number = float(value)
+    if not math.isfinite(number) or number <= 0.0:
+        return None
+    return number
+
+
+def _read_seed(seed_path: str | Path) -> tuple[float | None, Mapping[str, float]]:
+    """Read a seed file in either accepted form into ``(global, per_resource)``.
+
+    The JSON form is ``{"global": float, "per_resource": {rid: float}}``; a
+    file that is not JSON is read as a checkpoint, whose serving block carries
+    the same two things under ``threshold`` and ``per_resource``. Values are
+    returned as recorded -- usability is decided per key by the caller, so a
+    seed that carries a key uselessly is reported against that key.
+    """
+    try:
+        payload = json.loads(Path(seed_path).read_bytes())
+    except ValueError:  # not JSON (a checkpoint is a binary zip): read the serving block
+        import torch  # local: this module stays importable without torch
+
+        serving = torch.load(seed_path, map_location="cpu", weights_only=False).get("serving") or {}
+        return serving.get("threshold"), serving.get("per_resource") or {}
+    return payload.get("global"), payload.get("per_resource") or {}
+
+
+def _resolve_one(
+    key: str, current: float | None, seeded: float | None, seed_path: str | Path | None
+) -> float:
+    """The previous value for one key: the current one if usable, else the seeded one."""
+    resolved = _usable(current)
+    if resolved is None:
+        resolved = _usable(seeded)
+    if resolved is None:
+        from_seed = (
+            "no seed was given" if seed_path is None else f"the seed {seed_path!s} has none either"
+        )
+        raise SpecError(
+            f"no usable previous threshold for {key}: the current serving value is absent or "
+            f"unusable (non-finite, zero, or negative) and {from_seed}. Pass --seed PATH "
+            f"carrying {key} -- a checkpoint whose serving block has a per_resource map and a "
+            "global threshold, or a JSON map of global and per_resource. An unguarded first "
+            "bake is an error, not a default."
+        )
+    return resolved
+
+
+def resolve_old_thresholds(
+    serving: Mapping[str, Any],
+    resource_ids: Iterable[str],
+    *,
+    seed_path: str | Path | None = None,
+) -> tuple[float, dict[str, float]]:
+    """Resolve the ``(old_global, old)`` a rebake is guarded against.
+
+    Requirement 1, upstream of ``check_guards``: every value the guard needs
+    comes from the live serving block where that block has a usable one, and
+    from an explicit seed where it does not. The seed is a fallback, never an
+    override -- a usable serving value is what the rebake is measured against.
+
+    Args:
+        serving: The current serving block (``{"threshold": float,
+            "per_resource": {rid: float}, ...}``), as a checkpoint carries it.
+            Empty for a checkpoint with no serving block at all.
+        resource_ids: The resources the fresh bake proposes a threshold for.
+            Passing the bake's ``new`` map works: only its keys are read.
+        seed_path: The ``--seed`` file: a checkpoint whose serving block
+            carries a per_resource map and a global threshold, or a JSON
+            ``{"global": float, "per_resource": {rid: float}}`` map.
+
+    Returns:
+        ``(old_global, old)``, the inputs ``check_guards`` takes: a positive
+        finite global, and a per-resource map covering every id in
+        ``resource_ids`` plus every other usable entry of the serving map (a
+        resource the bake did not propose is an omission for the report to
+        record, not one to drop here).
+
+    Raises:
+        SpecError: If any needed value is neither usable in ``serving`` nor
+            usably supplied by the seed. The message names ``--seed`` and the
+            key -- ``global``, or the resource id.
+    """
+    current_per_resource: Mapping[str, float] = serving.get("per_resource") or {}
+    seed_global, seed_per_resource = (None, {}) if seed_path is None else _read_seed(seed_path)
+
+    old_global = _resolve_one("global", serving.get("threshold"), seed_global, seed_path)
+    old: dict[str, float] = {
+        resource_id: _resolve_one(
+            resource_id,
+            current_per_resource.get(resource_id),
+            seed_per_resource.get(resource_id),
+            seed_path,
+        )
+        for resource_id in resource_ids
+    }
+    for resource_id, value in current_per_resource.items():
+        if resource_id not in old:
+            usable = _usable(value)
+            if usable is not None:
+                old[resource_id] = usable
+
+    return old_global, old
