@@ -1,5 +1,5 @@
 # Description: Guarded serving-threshold recalibration: the per-week band and its verdicts.
-# Description: Torch-free; pure arithmetic over a previous/proposed threshold map.
+# Description: Reads the seed file, importing torch lazily; the band itself is pure arithmetic.
 
 """Band guards for a recalibrated serving threshold.
 
@@ -71,6 +71,9 @@ VERDICT_REJECTED_NONFINITE = "REJECTED-nonfinite"
 
 _BAND_REJECTIONS = frozenset({VERDICT_REJECTED_GREW, VERDICT_REJECTED_SHRANK})
 """The verdicts ``allow_drift`` may override: a band decision, and only that."""
+
+_ZIP_MAGIC = b"PK\x03\x04"
+"""Leading bytes of a zip archive, and so of a torch checkpoint; a JSON seed is text."""
 
 
 @dataclass(frozen=True)
@@ -282,19 +285,35 @@ def _usable(value: float | None) -> float | None:
 def _read_seed(seed_path: str | Path) -> tuple[float | None, Mapping[str, float]]:
     """Read a seed file in either accepted form into ``(global, per_resource)``.
 
-    The JSON form is ``{"global": float, "per_resource": {rid: float}}``; a
-    file that is not JSON is read as a checkpoint, whose serving block carries
-    the same two things under ``threshold`` and ``per_resource``. Values are
+    The form is chosen by content rather than by suffix, since ``--seed`` is an
+    operator-supplied path: a torch checkpoint is a zip archive, so a file
+    starting with the zip magic is read as one and its serving block carries the
+    two values under ``threshold`` and ``per_resource``; anything else is the
+    JSON form ``{"global": float, "per_resource": {rid: float}}``. Values are
     returned as recorded -- usability is decided per key by the caller, so a
     seed that carries a key uselessly is reported against that key.
+
+    Raises:
+        SpecError: If a seed that is not a checkpoint is not valid JSON either.
+            The message names the seed path and carries the decode error, which
+            is chained as the cause. Choosing the branch by the magic rather
+            than by a failed parse is what keeps a hand-written JSON typo from
+            being unpickled and reported as a torch failure instead.
     """
-    try:
-        payload = json.loads(Path(seed_path).read_bytes())
-    except ValueError:  # not JSON (a checkpoint is a binary zip): read the serving block
+    raw = Path(seed_path).read_bytes()
+    if raw.startswith(_ZIP_MAGIC):
         import torch  # local: this module stays importable without torch
 
         serving = torch.load(seed_path, map_location="cpu", weights_only=False).get("serving") or {}
         return serving.get("threshold"), serving.get("per_resource") or {}
+    try:
+        payload = json.loads(raw)
+    except ValueError as exc:
+        raise SpecError(
+            f"the seed {seed_path!s} is not a torch checkpoint (it does not start with the zip "
+            f"magic) and is not valid JSON: {exc}. A JSON seed is "
+            '{"global": float, "per_resource": {rid: float}}.'
+        ) from exc
     return payload.get("global"), payload.get("per_resource") or {}
 
 
@@ -352,7 +371,9 @@ def resolve_old_thresholds(
     Raises:
         SpecError: If any needed value is neither usable in ``serving`` nor
             usably supplied by the seed. The message names ``--seed`` and the
-            key -- ``global``, or the resource id.
+            key -- ``global``, or the resource id. Also if the seed file itself
+            is neither a checkpoint nor valid JSON, naming the path and the
+            decode error.
     """
     current_per_resource: Mapping[str, float] = serving.get("per_resource") or {}
     seed_global, seed_per_resource = (None, {}) if seed_path is None else _read_seed(seed_path)

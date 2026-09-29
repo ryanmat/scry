@@ -34,14 +34,21 @@ have been, and so is every current value that cannot serve as a band's ``old``:
 a NaN one turns the band off, an infinite one keeps itself in force forever, a
 zero one divides by zero. Each resolves through an explicit seed, in either
 accepted form, or the run stops naming ``--seed`` and the key it wanted.
+
+The seed reader picks its form by the zip magic a torch checkpoint starts with,
+so a hand-written JSON seed with a typo in it reports its own parse error rather
+than being unpickled and blamed on torch.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import re
+import sys
 from dataclasses import fields
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -95,6 +102,17 @@ def _write_seed(
     path = tmp_path / "seed.pt"
     torch.save({"serving": {"threshold": global_threshold, "per_resource": per_resource}}, path)
     return str(path)
+
+
+def _torch_that_must_not_load() -> ModuleType:
+    """A stand-in ``torch`` whose ``load`` fails the test if the seed reader calls it."""
+    module = ModuleType("torch")
+
+    def _load(*args: object, **kwargs: object) -> object:
+        raise AssertionError("torch.load called for a seed that is not a checkpoint")
+
+    module.load = _load  # type: ignore[attr-defined]
+    return module
 
 
 # One case per unusable kind: the current serving block, and the key it leaves
@@ -402,19 +420,22 @@ class TestSeedResolution:
         # usable keeps its current value -- the seed is a fallback, not an
         # override. With no seed the run stops on the typed spec error, naming
         # the flag that fixes it and the key it wanted, so an operator can act
-        # on the message without reading the serving block.
+        # on the message without reading the serving block. The key has to be
+        # named AS the key: `key in message` passes on any message carrying the
+        # word "global", which the fixed text of every one of these does, so a
+        # renamed key would go unnoticed. Matching "threshold for <key>:" is the
+        # position in the sentence where the key is reported.
         seeded_a = {"node-a": SEED_PER_RESOURCE["node-a"]}  # node-b is seeded but unneeded
         expected = (SEED_GLOBAL, USABLE_A) if key == "global" else (0.30, seeded_a)
 
         seeded = resolve_old_thresholds(
             serving, ["node-a"], seed_path=_write_seed(tmp_path, "json")
         )
-        with pytest.raises(SpecError) as excinfo:
+        with pytest.raises(SpecError, match=rf"threshold for {re.escape(key)}:") as excinfo:
             resolve_old_thresholds(serving, ["node-a"])
 
         assert seeded == expected
         assert "--seed" in str(excinfo.value)
-        assert key in str(excinfo.value)
 
     def test_a_seed_without_the_key_is_the_same_spec_error(self, tmp_path: Path) -> None:
         # A seed is not a free pass over the requirement: it has to carry the
@@ -435,13 +456,37 @@ class TestSeedResolution:
         # would, so it is refused on the same terms.
         seed_path = _write_seed(tmp_path, "json", global_threshold=0.0)
 
-        with pytest.raises(SpecError) as excinfo:
+        with pytest.raises(SpecError, match=r"threshold for global:") as excinfo:
             resolve_old_thresholds(
                 {"per_resource": {"node-a": 0.20}}, ["node-a"], seed_path=seed_path
             )
 
         assert "--seed" in str(excinfo.value)
-        assert "global" in str(excinfo.value)
+
+    def test_a_malformed_json_seed_reports_the_json_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A hand-written seed with a trailing comma used to be misreported as a
+        # checkpoint failure: the JSONDecodeError was swallowed and torch.load
+        # unpickled the text, so the operator saw `UnpicklingError: invalid load
+        # key, '{'` pointing at torch with no mention of the syntax error. The
+        # form is chosen by the zip magic a checkpoint starts with, so a text
+        # seed is only ever a JSON seed: it reports its own parse error, naming
+        # the seed path and carrying the decode error's message and position,
+        # with that error chained as the cause. torch.load is never reached --
+        # the stand-in below fails the test if it is called.
+        seed_path = tmp_path / "seed.json"
+        seed_path.write_text('{"global": 0.19, "per_resource": {"node-a": 0.21},}')
+        monkeypatch.setitem(sys.modules, "torch", _torch_that_must_not_load())
+
+        with pytest.raises(SpecError) as excinfo:
+            resolve_old_thresholds({"per_resource": {}}, ["node-a"], seed_path=str(seed_path))
+
+        message = str(excinfo.value)
+        assert str(seed_path) in message
+        assert "Expecting property name enclosed in double quotes" in message
+        assert "line 1 column" in message  # the decode error's position survives
+        assert isinstance(excinfo.value.__cause__, json.JSONDecodeError)
 
     def test_serving_resources_the_bake_did_not_propose_are_carried(self) -> None:
         # check_guards takes the whole previous map, not only the keys the bake
