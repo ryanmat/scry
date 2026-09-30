@@ -7,10 +7,12 @@ One implementation of the four gates that decide whether a resource's own
 healthy quantile is safe to bake: divergent coverage (the resource lacks a
 trained feature the capture supplies elsewhere, so capture-wide windowing
 fills it on a scale serving never produces), the minimum-window floor, a
-non-positive quantile, and a non-finite one. The last gate is not covered by
-the one before it: every comparison against a NaN is False, so a NaN quantile
-passes a ``<= 0`` screen and would be baked into a threshold no error can
-exceed, silencing the resource. Unlike a bake loop that skips a resource at its
+non-finite quantile, and a non-positive one, evaluated in that order so the
+first reason recorded for a ``-inf`` quantile is the non-finite one. The
+non-finite gate is not covered by the non-positive one: every comparison
+against a NaN is False, so a NaN quantile passes a ``<= 0`` screen and would be
+baked into a threshold no error can exceed, silencing the resource. Unlike a
+bake loop that skips a resource at its
 first failing gate, every gate is evaluated so a verdict lists all of its
 reasons, formatted ``"{REASON}:{detail}"``. Everything here is importable
 without torch.
