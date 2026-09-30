@@ -5,9 +5,11 @@
 
 Each gate is pinned through its reason string: divergent coverage (a trained
 feature the capture supplies elsewhere is missing for the resource), the
-window floor (exact ``insufficient-windows:12<50`` format), and non-positive
-quantile. The capture-feature arithmetic, multi-gate accumulation, stringified
-key iteration order, and the torch-free import contract are pinned separately.
+window floor (exact ``insufficient-windows:12<50`` format), non-positive
+quantile, and non-finite quantile -- the last of which no ``<= 0`` screen can
+catch, since every comparison against a NaN is False. The capture-feature
+arithmetic, multi-gate accumulation, stringified key iteration order, and the
+torch-free import contract are pinned separately.
 The bake-delegation tests run the real bake on a gated synthetic fleet and pin
 the printed eligibility map, its agreement with the per_resource map, the
 unchanged stderr warning text, and the compute_serving_block exposure.
@@ -30,6 +32,7 @@ from scry.data.fetcher import fetch_full_capture
 from scry.eval.hygiene import (
     MIN_PER_RESOURCE_WINDOWS,
     REASON_DIVERGENT,
+    REASON_NONFINITE_QUANTILE,
     REASON_NONPOSITIVE_QUANTILE,
     REASON_TOO_FEW_WINDOWS,
     ResourceEligibility,
@@ -65,6 +68,16 @@ class TestConstants:
         assert REASON_DIVERGENT == "divergent-coverage"
         assert REASON_TOO_FEW_WINDOWS == "insufficient-windows"
         assert REASON_NONPOSITIVE_QUANTILE == "non-positive-quantile"
+        assert REASON_NONFINITE_QUANTILE == "non-finite-quantile"
+
+    def test_reason_constants_are_package_exports(self) -> None:
+        # The four reasons are one vocabulary: a consumer reading three of them
+        # off the package and the fourth off the module would not notice the
+        # newest gate at all.
+        import scry.eval
+
+        assert scry.eval.REASON_NONFINITE_QUANTILE == REASON_NONFINITE_QUANTILE
+        assert "REASON_NONFINITE_QUANTILE" in scry.eval.__all__
 
 
 class TestDivergentCoverageGate:
@@ -154,6 +167,42 @@ class TestNonPositiveQuantileGate:
         assert verdict.eligible is False
         assert any(r.startswith(f"{REASON_NONPOSITIVE_QUANTILE}:") for r in verdict.reasons)
         assert verdict.own_quantile == 0.0
+
+
+class TestNonFiniteQuantileGate:
+    @pytest.mark.parametrize(
+        ("errors_for_node_b", "expected_detail"),
+        [
+            pytest.param(np.full(60, np.nan), "nan", id="nan"),
+            pytest.param(np.concatenate([np.full(59, 0.05), [np.inf]]), "inf", id="inf"),
+        ],
+    )
+    def test_non_finite_quantile_is_ineligible_on_its_own_reason(
+        self, errors_for_node_b: np.ndarray, expected_detail: str
+    ) -> None:
+        # A NaN quantile compares False against the non-positive gate's `<= 0`,
+        # so without a gate of its own it passes as eligible and the bake
+        # serves `margin * nan` -- a threshold no error can ever exceed, which
+        # silences the resource instead of protecting it. An infinite quantile
+        # is the same defect in the other direction: nothing can move it. Both
+        # are reported on their own reason, not folded into the non-positive
+        # one, so the verdict names what is wrong with the value. (A -inf
+        # quantile takes the same `not isfinite` branch; numpy's interpolation
+        # cannot produce one without a RuntimeWarning, so it is unpinned here.)
+        ids = np.array(["node-a"] * 60 + ["node-b"] * 60)
+        errors = np.concatenate([np.full(60, 0.05), errors_for_node_b])
+        result = per_resource_eligibility(
+            trained_features=_TRAINED,
+            features_by_resource=_full_coverage("node-a", "node-b"),
+            resource_ids=ids,
+            errors=errors,
+            quantile=0.99,
+        )
+
+        verdict = result["node-b"]
+        assert verdict.eligible is False
+        assert verdict.reasons == [f"{REASON_NONFINITE_QUANTILE}:{expected_detail}"]
+        assert result["node-a"].eligible is True
 
 
 class TestGateAccumulation:

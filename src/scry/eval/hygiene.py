@@ -1,20 +1,24 @@
 # Description: Per-resource eligibility gates for per-resource threshold baking.
-# Description: Torch-free; divergent coverage, window floor, and non-positive quantile verdicts.
+# Description: Torch-free; divergent coverage, window floor, and unusable quantile verdicts.
 
 """Per-resource eligibility gates.
 
-One implementation of the three gates that decide whether a resource's own
+One implementation of the four gates that decide whether a resource's own
 healthy quantile is safe to bake: divergent coverage (the resource lacks a
 trained feature the capture supplies elsewhere, so capture-wide windowing
-fills it on a scale serving never produces), the minimum-window floor, and a
-non-positive quantile. Unlike a bake loop that skips a resource at its first
-failing gate, every gate is evaluated so a verdict lists all of its reasons,
-formatted ``"{REASON}:{detail}"``. Everything here is importable without
-torch.
+fills it on a scale serving never produces), the minimum-window floor, a
+non-positive quantile, and a non-finite one. The last gate is not covered by
+the one before it: every comparison against a NaN is False, so a NaN quantile
+passes a ``<= 0`` screen and would be baked into a threshold no error can
+exceed, silencing the resource. Unlike a bake loop that skips a resource at its
+first failing gate, every gate is evaluated so a verdict lists all of its
+reasons, formatted ``"{REASON}:{detail}"``. Everything here is importable
+without torch.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -29,6 +33,7 @@ MIN_PER_RESOURCE_WINDOWS: int = 50
 REASON_DIVERGENT = "divergent-coverage"
 REASON_TOO_FEW_WINDOWS = "insufficient-windows"
 REASON_NONPOSITIVE_QUANTILE = "non-positive-quantile"
+REASON_NONFINITE_QUANTILE = "non-finite-quantile"
 
 
 @dataclass(frozen=True)
@@ -52,7 +57,7 @@ def per_resource_eligibility(
     quantile: float,
     min_windows: int = MIN_PER_RESOURCE_WINDOWS,
 ) -> dict[str, ResourceEligibility]:
-    """Evaluate the three eligibility gates for every resource in the capture.
+    """Evaluate the four eligibility gates for every resource in the capture.
 
     Verdict-identical to the per-resource bake gates: capture features are the
     union of features present anywhere in the capture intersected with the
@@ -88,6 +93,8 @@ def per_resource_eligibility(
         if n_windows < min_windows:
             reasons.append(f"{REASON_TOO_FEW_WINDOWS}:{n_windows}<{min_windows}")
         own_quantile = float(np.quantile(resource_errors, quantile)) if n_windows else None
+        if own_quantile is not None and not math.isfinite(own_quantile):
+            reasons.append(f"{REASON_NONFINITE_QUANTILE}:{own_quantile}")
         if own_quantile is not None and own_quantile <= 0:
             reasons.append(f"{REASON_NONPOSITIVE_QUANTILE}:{own_quantile}")
         verdicts[str(rid)] = ResourceEligibility(

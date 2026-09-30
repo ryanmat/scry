@@ -20,6 +20,7 @@ from scry.eval.detection import (
 from scry.eval.hygiene import (
     MIN_PER_RESOURCE_WINDOWS,
     REASON_DIVERGENT,
+    REASON_NONFINITE_QUANTILE,
     REASON_NONPOSITIVE_QUANTILE,
     REASON_TOO_FEW_WINDOWS,
     ResourceEligibility,
@@ -93,6 +94,7 @@ __all__ = [
     "MIN_PER_RESOURCE_WINDOWS",
     "ONSET_NAMES",
     "REASON_DIVERGENT",
+    "REASON_NONFINITE_QUANTILE",
     "REASON_NONPOSITIVE_QUANTILE",
     "REASON_TOO_FEW_WINDOWS",
     "ROLES",

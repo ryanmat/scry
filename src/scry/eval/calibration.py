@@ -36,6 +36,16 @@ supplied by an explicit ``--seed``. Absent that, the run is a spec error rather
 than an unguarded bake. That resolution is the only I/O in this module (it reads
 the seed file); the guard itself stays pure.
 
+``guard_rebake`` composes the three: resolve, guard, then stamp the provenance
+the band cannot know. A threshold measured against a seed is ``accepted-seeded``
+-- inside the band, but against a value that was never in production -- while
+one measured against the live serving block stays plainly ``accepted``. A
+serving resource the bake proposed nothing for keeps its threshold and records
+why: ``kept-gate-omitted:{reason}`` when the bake's eligibility map shows a
+hygiene gate dropped it, ``kept-absent-from-capture`` when the capture did not
+contain it at all. The two are different operator actions, which is why one
+verdict cannot serve for both.
+
 Age is not read here: callers pass ``weeks`` already anchored and floored (one
 day, i.e. ``weeks = 1/7``, is the youngest band a rebake ever claims). Pure
 arithmetic, no clock.
@@ -64,10 +74,15 @@ MAX_WEEKLY_SHRINK: float = 1.35
 """Most a threshold may shrink per week of age; tighter, shrinking is the FP direction."""
 
 VERDICT_ACCEPTED = "accepted"
+VERDICT_ACCEPTED_SEEDED = "accepted-seeded"
 VERDICT_ACCEPTED_ALLOW_DRIFT = "accepted-allow-drift"
 VERDICT_REJECTED_GREW = "REJECTED-grew"
 VERDICT_REJECTED_SHRANK = "REJECTED-shrank"
 VERDICT_REJECTED_NONFINITE = "REJECTED-nonfinite"
+VERDICT_KEPT_GATE_OMITTED = "kept-gate-omitted"
+"""Prefix; the full verdict is ``kept-gate-omitted:{reason}``, the hygiene gate's own."""
+
+VERDICT_KEPT_ABSENT_FROM_CAPTURE = "kept-absent-from-capture"
 
 _BAND_REJECTIONS = frozenset({VERDICT_REJECTED_GREW, VERDICT_REJECTED_SHRANK})
 """The verdicts ``allow_drift`` may override: a band decision, and only that."""
@@ -187,6 +202,39 @@ def _guard_one(
     return kept, verdict
 
 
+def _omission_verdict(
+    resource_id: str,
+    old: float,
+    eligibility: Mapping[str, ResourceEligibility] | None,
+) -> GuardVerdict:
+    """The verdict for a serving resource the bake proposed no threshold for.
+
+    Requirement 4: the previous report could not tell a hygiene-gate omission
+    from a resource the capture never contained, which are different operator
+    actions -- fix the gate, or retire the threshold. The bake's eligibility
+    map is what distinguishes them, and the gate's own reason rides on the
+    verdict, so the rebake report names the gate rather than the symptom. A
+    resource the map lists as eligible cannot reach here (the bake proposes a
+    threshold for every eligible resource) and reads as absent from the
+    capture, as it does when no eligibility map was supplied at all.
+    """
+    verdict_for = None if eligibility is None else eligibility.get(resource_id)
+    if verdict_for is None or verdict_for.eligible:
+        verdict = VERDICT_KEPT_ABSENT_FROM_CAPTURE
+    else:
+        # Reasons are recorded in gate order, so the first one names the gate
+        # that omitted the resource -- the convention the bake's warnings use.
+        verdict = f"{VERDICT_KEPT_GATE_OMITTED}:{verdict_for.reasons[0]}"
+    return GuardVerdict(
+        resource_id=resource_id,
+        verdict=verdict,
+        old=old,
+        proposed=None,
+        ratio=None,
+        limit=None,
+    )
+
+
 def check_guards(
     old_global: float | None,
     old: Mapping[str, float],
@@ -216,9 +264,9 @@ def check_guards(
         new: The freshly baked per-resource thresholds.
         weeks: Age of the previous values in weeks, already anchored and
             floored by the caller.
-        eligibility: The bake's eligibility map. Accepted for the omission
-            provenance of resources present in ``old`` and absent from ``new``;
-            not read yet.
+        eligibility: The bake's eligibility map, read for the omission
+            provenance of a resource present in ``old`` and absent from
+            ``new``: a hygiene gate dropped it, or the capture never had it.
         allow_drift: Keep values the band rejected, restamped
             ``accepted-allow-drift``. Bypasses the band and nothing else:
             neither the seed requirement above nor the non-finite rejection.
@@ -228,12 +276,13 @@ def check_guards(
     Returns:
         ``(kept_global, kept, verdicts)``: the global threshold that stays in
         force, the per-resource map that stays in force (an accepted proposal,
-        or the previous value where the proposal was rejected), and one verdict
-        per guarded value -- the global first as ``resource_id=None``, then the
-        resources in sorted order. A resource in ``old`` with no proposal in
-        ``new`` is neither guarded nor carried here; distinguishing a
-        hygiene-gate omission from absence from the capture is what
-        ``eligibility`` is for.
+        or the previous value where the proposal was rejected or where the bake
+        proposed nothing), and one verdict per value -- the global first as
+        ``resource_id=None``, then every resource of either map in sorted
+        order. A resource in ``old`` with no proposal in ``new`` keeps its
+        previous threshold, since dropping it from the map would fall the
+        resource back to the global with no verdict saying so, and its verdict
+        records why it was omitted (``eligibility``).
     """
     kept_global, global_verdict = _guard_one(
         None,
@@ -246,16 +295,20 @@ def check_guards(
     )
     verdicts = [global_verdict]
     kept: dict[str, float] = {}
-    for resource_id in sorted(new):
-        kept[resource_id], verdict = _guard_one(
-            resource_id,
-            old[resource_id],
-            new[resource_id],
-            weeks,
-            allow_drift=allow_drift,
-            max_weekly_growth=max_weekly_growth,
-            max_weekly_shrink=max_weekly_shrink,
-        )
+    for resource_id in sorted({*new, *old}):
+        if resource_id in new:
+            kept[resource_id], verdict = _guard_one(
+                resource_id,
+                old[resource_id],
+                new[resource_id],
+                weeks,
+                allow_drift=allow_drift,
+                max_weekly_growth=max_weekly_growth,
+                max_weekly_shrink=max_weekly_shrink,
+            )
+        else:
+            kept[resource_id] = old[resource_id]
+            verdict = _omission_verdict(resource_id, old[resource_id], eligibility)
         verdicts.append(verdict)
 
     return kept_global, kept, verdicts
@@ -395,3 +448,81 @@ def resolve_old_thresholds(
                 old[resource_id] = usable
 
     return old_global, old
+
+
+def _stamp_seeded(verdict: GuardVerdict, serving: Mapping[str, Any]) -> GuardVerdict:
+    """``accepted-seeded`` where the value the band measured against came from the seed.
+
+    Requirement 1 leaves the stamp to the caller, since ``check_guards`` is a
+    pure function of ``(old, new, weeks)`` and cannot know where ``old`` came
+    from; here the serving block is in hand, so the test is the same usability
+    rule the resolution applied to it. The stamp replaces the plain
+    ``accepted`` verdict only: a band rejection, a non-finite rejection, an
+    allow-drift bypass, and a kept omission each name a decision, and the
+    provenance must not overwrite one -- a rejection measured against a seed
+    is still a rejection, and its seeded ``old`` is recorded on the verdict.
+    """
+    if verdict.verdict != VERDICT_ACCEPTED:
+        return verdict
+    if verdict.resource_id is None:
+        current = serving.get("threshold")
+    else:
+        current = (serving.get("per_resource") or {}).get(verdict.resource_id)
+    if _usable(current) is not None:
+        return verdict
+    return replace(verdict, verdict=VERDICT_ACCEPTED_SEEDED)
+
+
+def guard_rebake(
+    serving: Mapping[str, Any],
+    new_global: float,
+    new: Mapping[str, float],
+    weeks: float,
+    *,
+    eligibility: Mapping[str, ResourceEligibility] | None = None,
+    seed_path: str | Path | None = None,
+    allow_drift: bool = False,
+    max_weekly_growth: float = MAX_WEEKLY_GROWTH,
+    max_weekly_shrink: float = MAX_WEEKLY_SHRINK,
+) -> tuple[float, dict[str, float], list[GuardVerdict]]:
+    """Guard a rebake against the serving block it would replace.
+
+    The composed path: resolve what ``old`` is (the live serving block, or the
+    seed where that block has nothing usable), run the band over it, then stamp
+    the provenance the band cannot know. ``check_guards`` stays the pure
+    function of ``(old, new, weeks)`` it is; this is its caller.
+
+    Args:
+        serving: The current serving block the rebake would replace.
+        new_global: The freshly baked global threshold.
+        new: The freshly baked per-resource thresholds.
+        weeks: Age of the serving block in weeks, already anchored and floored.
+        eligibility: The bake's eligibility map, for omission provenance.
+        seed_path: The ``--seed`` file, for values ``serving`` cannot supply.
+        allow_drift: Keep values the band rejected, restamped.
+        max_weekly_growth: Per-week base of the grow limit.
+        max_weekly_shrink: Per-week base of the shrink floor.
+
+    Returns:
+        ``(kept_global, kept, verdicts)`` as ``check_guards`` returns them,
+        with every verdict measured against a seeded ``old`` restamped
+        ``accepted-seeded`` -- the report then says which thresholds were never
+        in production, rather than reading as if the band had confirmed them.
+
+    Raises:
+        SpecError: If a value the band needs is neither usable in ``serving``
+            nor usably supplied by the seed.
+    """
+    old_global, old = resolve_old_thresholds(serving, new, seed_path=seed_path)
+    kept_global, kept, verdicts = check_guards(
+        old_global,
+        old,
+        new_global,
+        new,
+        weeks,
+        eligibility=eligibility,
+        allow_drift=allow_drift,
+        max_weekly_growth=max_weekly_growth,
+        max_weekly_shrink=max_weekly_shrink,
+    )
+    return kept_global, kept, [_stamp_seeded(verdict, serving) for verdict in verdicts]

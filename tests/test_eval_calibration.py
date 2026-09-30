@@ -38,6 +38,15 @@ accepted form, or the run stops naming ``--seed`` and the key it wanted.
 The seed reader picks its form by the zip magic a torch checkpoint starts with,
 so a hand-written JSON seed with a typo in it reports its own parse error rather
 than being unpickled and blamed on torch.
+
+``guard_rebake`` is the composed path: resolution, then the band, then the
+provenance stamps. A verdict measured against a seeded ``old`` says so
+(``accepted-seeded``), while one measured against the live serving block stays
+plainly accepted -- and ``check_guards``, a pure function of (old, new, weeks),
+is not what knows the difference. A resource the bake proposed nothing for
+keeps its serving threshold with the reason it was omitted on its verdict: the
+hygiene gate that dropped it (``kept-gate-omitted:insufficient-windows:12<50``)
+or its absence from the capture altogether (``kept-absent-from-capture``).
 """
 
 from __future__ import annotations
@@ -50,9 +59,17 @@ from dataclasses import fields
 from pathlib import Path
 from types import ModuleType
 
+import numpy as np
 import pytest
 
-from scry.eval.calibration import GuardVerdict, check_guards, guard_value, resolve_old_thresholds
+from scry.eval.calibration import (
+    GuardVerdict,
+    check_guards,
+    guard_rebake,
+    guard_value,
+    resolve_old_thresholds,
+)
+from scry.eval.hygiene import ResourceEligibility, per_resource_eligibility
 from scry.eval.rubric import SpecError
 
 ONE_DAY_IN_WEEKS = 1.0 / 7.0
@@ -102,6 +119,27 @@ def _write_seed(
     path = tmp_path / "seed.pt"
     torch.save({"serving": {"threshold": global_threshold, "per_resource": per_resource}}, path)
     return str(path)
+
+
+def _gated_eligibility() -> dict[str, ResourceEligibility]:
+    """A real hygiene verdict map for the capture behind the omission tests.
+
+    node-a passes every gate and is baked; node-b has 12 windows against the
+    50-window floor; node-c's windows are all NaN, so its own quantile is NaN
+    and the non-finite gate drops it. node-z is not in the capture at all and
+    so is absent from this map. The map comes from the gates themselves rather
+    than hand-built verdicts: the reason strings the rebake report publishes
+    are hygiene's, and inventing them here would not notice a format change.
+    """
+    ids = np.array(["node-a"] * 60 + ["node-b"] * 12 + ["node-c"] * 60)
+    errors = np.concatenate([np.full(60, 0.05), np.full(12, 0.05), np.full(60, np.nan)])
+    return per_resource_eligibility(
+        trained_features=("cpu",),
+        features_by_resource={rid: {"cpu"} for rid in ("node-a", "node-b", "node-c")},
+        resource_ids=ids,
+        errors=errors,
+        quantile=0.99,
+    )
 
 
 def _torch_that_must_not_load() -> ModuleType:
@@ -524,6 +562,248 @@ class TestSeedResolution:
 
         assert old_global == 0.30
         assert old == {"node-a": 0.20, "node-z": 0.25}
+
+
+class TestComposedGuardPath:
+    def test_the_seeded_old_values_are_what_the_band_measures(self, tmp_path: Path) -> None:
+        # Requirement 1's mechanism, composed: with an empty serving
+        # per_resource map the seed carries the only previous values there are,
+        # and they are what the band measures against -- node-a's 1.05x move
+        # against the seeded 0.21 is inside the band, node-b's 2.0x move
+        # against the seeded 0.22 is not, and the seeded value is what stays in
+        # force for it. A composition that resolved the seed and then guarded
+        # something else would report another old; one that never resolved it
+        # would stop on the spec error instead.
+        kept_global, kept, verdicts = guard_rebake(
+            {"per_resource": {}},
+            SEED_GLOBAL * 1.1,
+            {
+                "node-a": SEED_PER_RESOURCE["node-a"] * 1.05,
+                "node-b": SEED_PER_RESOURCE["node-b"] * 2.0,
+            },
+            GUARD_WEEKS,
+            seed_path=_write_seed(tmp_path, "checkpoint"),
+        )
+
+        by_resource = {verdict.resource_id: verdict for verdict in verdicts}
+        assert by_resource[None].old == SEED_GLOBAL
+        assert by_resource["node-a"].old == SEED_PER_RESOURCE["node-a"]
+        assert by_resource["node-b"].old == SEED_PER_RESOURCE["node-b"]
+        assert by_resource["node-b"].verdict == "REJECTED-grew"
+        assert kept["node-b"] == SEED_PER_RESOURCE["node-b"]
+        assert kept["node-a"] == pytest.approx(SEED_PER_RESOURCE["node-a"] * 1.05)
+        assert kept_global == pytest.approx(SEED_GLOBAL * 1.1)
+
+    def test_only_the_verdicts_whose_old_came_from_the_seed_are_stamped(
+        self, tmp_path: Path
+    ) -> None:
+        # The stamp records provenance, not a decision: node-b had no usable
+        # serving value and was measured against the seed, so its verdict says
+        # so, while the global and node-a were measured against the live
+        # serving block and stay plainly accepted. An operator reading
+        # `accepted-seeded` knows that threshold was never in production.
+        # check_guards is not what stamps it: given the same resolved inputs it
+        # returns the plain verdict, because it is a pure function of (old,
+        # new, weeks) and knows nothing about where old came from.
+        serving = {"threshold": 0.30, "per_resource": {"node-a": 0.20}}
+        new = {"node-a": 0.22, "node-b": 0.23}
+
+        _, _, verdicts = guard_rebake(
+            serving, 0.33, new, GUARD_WEEKS, seed_path=_write_seed(tmp_path, "json")
+        )
+        _, _, unstamped = check_guards(
+            0.30, {"node-a": 0.20, "node-b": SEED_PER_RESOURCE["node-b"]}, 0.33, new, GUARD_WEEKS
+        )
+
+        by_resource = {verdict.resource_id: verdict for verdict in verdicts}
+        assert by_resource["node-b"].verdict == "accepted-seeded"
+        assert by_resource["node-b"].old == SEED_PER_RESOURCE["node-b"]
+        assert by_resource[None].verdict == "accepted"
+        assert by_resource["node-a"].verdict == "accepted"
+        assert [verdict.verdict for verdict in unstamped] == ["accepted"] * 3
+
+    def test_omitted_resources_keep_their_threshold_and_say_why(self) -> None:
+        # Requirement 4: the old report could not tell a hygiene-gate omission
+        # from a resource the capture never contained, so an operator could not
+        # tell a fixable gate failure from a decommissioned node. The bake's
+        # eligibility map is what distinguishes them, and each verdict carries
+        # the gate's own reason. Both kinds KEEP the serving threshold: dropping
+        # it from the map would silently fall the resource back to the global,
+        # a live threshold change nobody asked for and no verdict would show.
+        serving = {
+            "threshold": 0.30,
+            "per_resource": {"node-z": 0.25, "node-c": 0.22, "node-a": 0.20, "node-b": 0.21},
+        }
+
+        kept_global, kept, verdicts = guard_rebake(
+            serving, 0.33, {"node-a": 0.22}, GUARD_WEEKS, eligibility=_gated_eligibility()
+        )
+
+        by_resource = {verdict.resource_id: verdict for verdict in verdicts}
+        assert by_resource["node-b"].verdict == "kept-gate-omitted:insufficient-windows:12<50"
+        assert by_resource["node-c"].verdict == "kept-gate-omitted:non-finite-quantile:nan"
+        assert by_resource["node-z"].verdict == "kept-absent-from-capture"
+        assert kept == {"node-a": 0.22, "node-b": 0.21, "node-c": 0.22, "node-z": 0.25}
+        assert kept_global == 0.33
+
+        omitted = by_resource["node-b"]
+        assert omitted.old == 0.21  # the value that stays in force
+        assert omitted.proposed is None  # nothing was proposed, so there is no band
+        assert omitted.ratio is None
+        assert omitted.limit is None
+
+        # The report is a deterministic artifact: the global leads, then every
+        # resource in sorted order whether it was guarded or omitted (the
+        # serving map above is deliberately in another order).
+        assert [verdict.resource_id for verdict in verdicts] == [
+            None,
+            "node-a",
+            "node-b",
+            "node-c",
+            "node-z",
+        ]
+
+    def test_an_eligible_resource_with_no_proposal_is_not_blamed_on_a_gate(self) -> None:
+        # The bake bakes a threshold for every resource its gates pass, so a
+        # resource the eligibility map calls eligible should have a proposal.
+        # Where the two disagree there is no gate reason to name, and the
+        # verdict falls back to the absence one rather than publishing an
+        # empty reason or failing on one. node-a is eligible in the map below
+        # and this bake proposed nothing at all.
+        _, kept, verdicts = guard_rebake(
+            {"threshold": 0.30, "per_resource": {"node-a": 0.20}},
+            0.33,
+            {},
+            GUARD_WEEKS,
+            eligibility=_gated_eligibility(),
+        )
+
+        by_resource = {verdict.resource_id: verdict for verdict in verdicts}
+        assert _gated_eligibility()["node-a"].eligible is True
+        assert by_resource["node-a"].verdict == "kept-absent-from-capture"
+        assert kept == {"node-a": 0.20}
+
+    def test_an_omission_with_no_eligibility_map_is_absent_from_capture(self) -> None:
+        # Without the bake's map there is nothing to attribute an omission to,
+        # and claiming a gate failed would be an invention. node-b keeps its
+        # threshold either way.
+        _, kept, verdicts = guard_rebake(
+            {"threshold": 0.30, "per_resource": {"node-a": 0.20, "node-b": 0.21}},
+            0.33,
+            {"node-a": 0.22},
+            GUARD_WEEKS,
+        )
+
+        by_resource = {verdict.resource_id: verdict for verdict in verdicts}
+        assert by_resource["node-b"].verdict == "kept-absent-from-capture"
+        assert kept == {"node-a": 0.22, "node-b": 0.21}
+
+    def test_a_seeded_global_and_an_unusable_serving_value_are_stamped(
+        self, tmp_path: Path
+    ) -> None:
+        # The stamp reads the same usability rule the resolution applied, not
+        # mere presence: a serving global of NaN and a serving node-b of zero are
+        # present but unusable, so both were measured against the seed and say
+        # so. The global is requirement 1's own case -- the first bake whose
+        # previous global was never in production -- and must not read as a
+        # plainly accepted threshold. node-a had a usable serving value.
+        serving = {"threshold": float("nan"), "per_resource": {"node-a": 0.20, "node-b": 0.0}}
+
+        _, _, verdicts = guard_rebake(
+            serving,
+            SEED_GLOBAL * 1.05,
+            {"node-a": 0.22, "node-b": SEED_PER_RESOURCE["node-b"] * 1.05},
+            GUARD_WEEKS,
+            seed_path=_write_seed(tmp_path, "json"),
+        )
+
+        by_resource = {verdict.resource_id: verdict for verdict in verdicts}
+        assert by_resource[None].verdict == "accepted-seeded"
+        assert by_resource[None].old == SEED_GLOBAL
+        assert by_resource["node-b"].verdict == "accepted-seeded"
+        assert by_resource["node-b"].old == SEED_PER_RESOURCE["node-b"]
+        assert by_resource["node-a"].verdict == "accepted"
+
+    def test_allow_drift_reaches_the_guard_and_keeps_its_own_stamp(self, tmp_path: Path) -> None:
+        # --allow-drift passes through the composed path to the band, and the
+        # seed stamp does not overwrite the decision it records: node-b's 2.0x
+        # move against its seeded 0.22 is over the band, kept anyway, and stamped
+        # accepted-allow-drift; node-a inside the band is accepted-seeded.
+        _, kept, verdicts = guard_rebake(
+            {"threshold": 0.30, "per_resource": {}},
+            0.33,
+            {
+                "node-a": SEED_PER_RESOURCE["node-a"] * 1.05,
+                "node-b": SEED_PER_RESOURCE["node-b"] * 2.0,
+            },
+            GUARD_WEEKS,
+            seed_path=_write_seed(tmp_path, "json"),
+            allow_drift=True,
+        )
+
+        by_resource = {verdict.resource_id: verdict for verdict in verdicts}
+        assert by_resource["node-b"].verdict == "accepted-allow-drift"
+        assert kept["node-b"] == pytest.approx(SEED_PER_RESOURCE["node-b"] * 2.0)
+        assert by_resource["node-a"].verdict == "accepted-seeded"
+        assert by_resource[None].verdict == "accepted"
+
+    def test_the_band_bases_reach_the_guard(self) -> None:
+        # A 1.4x grow and a 1/1.3 shrink are inside the default one-week band
+        # (1.5 and 1/1.35) and outside a band of 1.3 and 1/1.2; the composed
+        # path guards with the bases it was given.
+        _, _, verdicts = guard_rebake(
+            {"threshold": 0.30, "per_resource": {"node-a": 0.20}},
+            0.30 / 1.3,
+            {"node-a": 0.20 * 1.4},
+            GUARD_WEEKS,
+            max_weekly_growth=1.3,
+            max_weekly_shrink=1.2,
+        )
+
+        by_resource = {verdict.resource_id: verdict for verdict in verdicts}
+        assert by_resource[None].verdict == "REJECTED-shrank"
+        assert by_resource["node-a"].verdict == "REJECTED-grew"
+
+    def test_an_omission_names_the_first_gate_that_failed(self) -> None:
+        # node-b has 12 windows of zero error, so it fails the window floor and
+        # the non-positive gate both; the verdict names the first in gate order,
+        # the convention the bake's own warning follows.
+        ids = np.array(["node-a"] * 60 + ["node-b"] * 12)
+        errors = np.concatenate([np.full(60, 0.05), np.zeros(12)])
+        eligibility = per_resource_eligibility(
+            trained_features=("cpu",),
+            features_by_resource={rid: {"cpu"} for rid in ("node-a", "node-b")},
+            resource_ids=ids,
+            errors=errors,
+            quantile=0.99,
+        )
+
+        _, _, verdicts = guard_rebake(
+            {"threshold": 0.30, "per_resource": {"node-a": 0.20, "node-b": 0.21}},
+            0.33,
+            {"node-a": 0.22},
+            GUARD_WEEKS,
+            eligibility=eligibility,
+        )
+
+        assert eligibility["node-b"].reasons == [
+            "insufficient-windows:12<50",
+            "non-positive-quantile:0.0",
+        ]
+        by_resource = {verdict.resource_id: verdict for verdict in verdicts}
+        assert by_resource["node-b"].verdict == "kept-gate-omitted:insufficient-windows:12<50"
+
+    def test_guarded_and_omitted_resources_interleave_in_sorted_order(self) -> None:
+        # The guarded resource sorts between two omitted ones, so a verdict list
+        # that appended omissions after the guarded resources would differ.
+        _, _, verdicts = guard_rebake(
+            {"threshold": 0.30, "per_resource": {"node-c": 0.22, "node-a": 0.20, "node-b": 0.21}},
+            0.33,
+            {"node-b": 0.22},
+            GUARD_WEEKS,
+        )
+
+        assert [verdict.resource_id for verdict in verdicts] == [None, "node-a", "node-b", "node-c"]
 
 
 class TestPackageExports:
