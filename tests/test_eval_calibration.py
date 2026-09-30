@@ -483,10 +483,32 @@ class TestSeedResolution:
             resolve_old_thresholds({"per_resource": {}}, ["node-a"], seed_path=str(seed_path))
 
         message = str(excinfo.value)
+        cause = excinfo.value.__cause__
         assert str(seed_path) in message
-        assert "Expecting property name enclosed in double quotes" in message
+        assert isinstance(cause, json.JSONDecodeError)
+        # The interpreter's own wording is what the message embeds, whichever version prints it:
+        # 3.12 says "Expecting property name enclosed in double quotes", 3.13 and later "Illegal
+        # trailing comma before end of object", so the assertion reads the chained error itself.
+        assert str(cause) in message
         assert "line 1 column" in message  # the decode error's position survives
-        assert isinstance(excinfo.value.__cause__, json.JSONDecodeError)
+
+    def test_a_seed_that_is_neither_zip_nor_text_reports_the_decode_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # torch's pre-zip serialization starts with the pickle protocol header, not the zip
+        # magic, and is not UTF-8 text either, so it goes down the JSON branch and the decode
+        # failure is the typed spec error with the UnicodeDecodeError chained; torch.load is
+        # never reached for it. Every scry writer saves the zip format, so this seed shape is a
+        # mistaken --seed, and the message says which form is expected.
+        seed_path = tmp_path / "seed.pkl"
+        seed_path.write_bytes(b"\x80\x02}q.")
+        monkeypatch.setitem(sys.modules, "torch", _torch_that_must_not_load())
+
+        with pytest.raises(SpecError) as excinfo:
+            resolve_old_thresholds({"per_resource": {}}, ["node-a"], seed_path=str(seed_path))
+
+        assert isinstance(excinfo.value.__cause__, UnicodeDecodeError)
+        assert str(seed_path) in str(excinfo.value)
 
     def test_serving_resources_the_bake_did_not_propose_are_carried(self) -> None:
         # check_guards takes the whole previous map, not only the keys the bake

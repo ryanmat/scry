@@ -310,8 +310,8 @@ def _read_seed(seed_path: str | Path) -> tuple[float | None, Mapping[str, float]
         payload = json.loads(raw)
     except ValueError as exc:
         raise SpecError(
-            f"the seed {seed_path!s} is not a torch checkpoint (it does not start with the zip "
-            f"magic) and is not valid JSON: {exc}. A JSON seed is "
+            f"the seed {seed_path!s} is not a zip-format torch checkpoint (it does not start "
+            f"with the zip magic) and is not valid JSON: {exc}. A JSON seed is "
             '{"global": float, "per_resource": {rid: float}}.'
         ) from exc
     return payload.get("global"), payload.get("per_resource") or {}
