@@ -55,6 +55,17 @@ rather than the bake. The mtime is the fallback for a block with no stamp, and
 either way the age floors at one day (``weeks = 1/7``), the narrowest band a
 rebake ever claims. Everything else in this module is pure arithmetic over the
 ``weeks`` it returns.
+
+``build_rebake_report`` turns all of that into the document an operator reads:
+one row per guarded value, carrying the verdict, the numbers it was decided
+from, and the threshold that stays in force afterwards. That last field is why
+a row exists at all rather than a verdict string -- a ``kept-gate-omitted``
+resource goes on serving its own previous threshold, and a report that showed
+only the verdict would leave a reader to assume it fell back to the global.
+The report is strict JSON: a non-finite proposal, which ``json.dumps`` would
+otherwise write as a bare ``NaN`` that no strict reader accepts, is recorded as
+``"nan"``, ``"inf"``, or ``"-inf"``, so the one artifact that records a
+non-finite rejection can always be written.
 """
 
 from __future__ import annotations
@@ -587,3 +598,104 @@ def weeks_since_rebake(serving: Mapping[str, Any], checkpoint_path: str | Path) 
     else:
         anchor = _parse_stamp(stamp)
     return max(datetime.now(timezone.utc) - anchor, AGE_FLOOR) / _ONE_WEEK
+
+
+def _json_number(value: float | None) -> float | str | None:
+    """One number as strict JSON takes it: a non-finite one under its name.
+
+    ``json.dumps`` writes NaN and the infinities as the bare literals ``NaN``,
+    ``Infinity``, and ``-Infinity``, which are not JSON -- and ``allow_nan=
+    False`` refuses them outright rather than writing them. A rebake that
+    proposed a non-finite threshold would then be unable to write the report
+    recording that rejection, the one place the proposal is visible at all. So
+    the value is written as ``"nan"``, ``"inf"``, or ``"-inf"``: still legible,
+    and a string no consumer can mistake for a number to compute with.
+    """
+    if value is None:
+        return None
+    number = float(value)
+    if math.isfinite(number):
+        return number
+    if math.isnan(number):
+        return "nan"
+    return "inf" if number > 0.0 else "-inf"
+
+
+def _verdict_row(verdict: GuardVerdict, kept: float) -> dict[str, Any]:
+    """One verdict as a report row, naming the threshold that stays in force.
+
+    The verdict records the decision; ``kept`` records its consequence, and the
+    two are not the same reading. An ``accepted`` row serves its proposal, a
+    rejected one serves the previous value, and an omitted one serves the
+    previous value as well -- which is the row that most needs saying so, since
+    a reader who sees no threshold for a resource would otherwise take it to
+    have fallen back to the global one.
+    """
+    return {
+        "verdict": verdict.verdict,
+        "old": _json_number(verdict.old),
+        "proposed": _json_number(verdict.proposed),
+        "kept": _json_number(kept),
+        "ratio": _json_number(verdict.ratio),
+        "limit": _json_number(verdict.limit),
+    }
+
+
+def build_rebake_report(
+    kept_global: float,
+    kept: Mapping[str, float],
+    verdicts: Iterable[GuardVerdict],
+    weeks: float,
+    *,
+    dry_run: bool,
+    staged_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Assemble the rebake report from a guarded bake.
+
+    The untracked report's shape extended, not replaced: section 10 carries
+    over the globals and a verdict per resource recording old, proposed,
+    ratio, and limit, and this adds the threshold each row keeps, the age the
+    band was measured over, where the bake was staged, and ``dry_run`` as a
+    field of the document rather than a property of the exit code (requirement
+    5 -- one code can no longer mean both a dry run and a live swap that
+    partially held, so the report has to say which this was).
+
+    A pure function of its arguments: no clock, no file, nothing read. Every
+    number goes through the strict-JSON encoding above, so the result always
+    survives ``json.dumps(..., allow_nan=False)`` and reads back equal.
+
+    Args:
+        kept_global: The global threshold that stays in force.
+        kept: The per-resource thresholds that stay in force. Must cover every
+            resource in ``verdicts``, as ``check_guards`` returns it.
+        verdicts: The verdicts of this rebake, from ``check_guards`` or
+            ``guard_rebake``: the global as ``resource_id=None``, then the
+            resources in sorted order, which is the order published here.
+        weeks: Age of the previous values in weeks, the band's own exponent.
+        dry_run: Whether this run was to stop short of a live swap.
+        staged_path: Where the staged checkpoint was written, if one was.
+
+    Returns:
+        ``{"dry_run", "weeks", "staged_path", "global", "per_resource"}``,
+        where ``global`` is one row and ``per_resource`` maps each resource id
+        to one. A row is ``{"verdict", "old", "proposed", "kept", "ratio",
+        "limit"}``: the decision, the two values it was made from, the
+        threshold that serves afterwards, and the comparison the band made
+        (``ratio`` and ``limit`` are ``None`` where it made none -- an omitted
+        resource, or a non-finite proposal that never formed a ratio).
+    """
+    global_row: dict[str, Any] | None = None
+    per_resource: dict[str, dict[str, Any]] = {}
+    for verdict in verdicts:
+        if verdict.resource_id is None:
+            global_row = _verdict_row(verdict, kept_global)
+        else:
+            per_resource[verdict.resource_id] = _verdict_row(verdict, kept[verdict.resource_id])
+
+    return {
+        "dry_run": bool(dry_run),
+        "weeks": _json_number(weeks),
+        "staged_path": None if staged_path is None else str(staged_path),
+        "global": global_row,
+        "per_resource": per_resource,
+    }

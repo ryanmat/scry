@@ -55,6 +55,15 @@ carry a serving block baked weeks ago, and a band anchored on the file widens
 to match the copy rather than the bake. The stamp the block carries is the
 anchor; the mtime is the fallback for a block that has none. Either way the age
 floors at one day, the narrowest band a same-day rebake can claim.
+
+``build_rebake_report`` assembles what an operator reads afterwards, and is
+pinned on the two things a report of a rejection has to survive. It is strict
+JSON: the proposal a ``REJECTED-nonfinite`` verdict rejected is written as
+``"nan"``, ``"inf"``, or ``"-inf"``, because ``json.dumps`` spells a bare NaN
+in a form no strict reader accepts and the report is the only record that the
+rejection happened. And every row names the threshold that stays in force, so
+a gate-omitted resource reads as keeping its own threshold rather than as
+falling back to the global one.
 """
 
 from __future__ import annotations
@@ -74,6 +83,7 @@ import pytest
 
 from scry.eval.calibration import (
     GuardVerdict,
+    build_rebake_report,
     check_guards,
     guard_rebake,
     guard_value,
@@ -165,7 +175,7 @@ def _torch_that_must_not_load() -> ModuleType:
 
 
 AGE_TOLERANCE_WEEKS = 1e-4
-"""About six seconds of slack on an asserted age: no test here turns on less."""
+"""About a minute of slack on an asserted age (1e-4 week is 60.5 s): no test turns on less."""
 
 
 def _aged_file(tmp_path: Path, mtime: datetime) -> str:
@@ -886,6 +896,164 @@ class TestAgeAnchor:
         _, verdict = guard_value(None, 0.2, 0.22, weeks)
         assert round(verdict.limit, 6) == 1.059634
         assert verdict.verdict == "REJECTED-grew"
+
+    def test_a_stamp_in_the_future_floors_instead_of_going_negative(self, tmp_path: Path) -> None:
+        # A clock skew between the host that baked the block and this one can
+        # stamp it ahead of now, and the elapsed time is then negative. The
+        # band is exponential in this number, so a negative age turns it inside
+        # out: at weeks = -1 the grow limit 1.5**-1 == 0.667 sits BELOW the
+        # shrink floor 1.35, the band holds nothing, and every threshold is
+        # rejected -- a whole rebake silently held, reported as a fleet that
+        # drifted. The floor the hour-ago case lands on is what keeps the skew
+        # harmless, and the file below is two weeks old to show the mtime
+        # fallback is not what answers here.
+        now = datetime.now(timezone.utc)
+        path = _aged_file(tmp_path, now - timedelta(weeks=2))
+
+        weeks = weeks_since_rebake({"rebaked_at": _stamp(now + timedelta(weeks=1))}, path)
+
+        assert weeks == ONE_DAY_IN_WEEKS
+
+    def test_an_unreadable_stamp_raises_instead_of_falling_back_to_the_mtime(
+        self, tmp_path: Path
+    ) -> None:
+        # The mtime is the fallback for a block with NO stamp, never for one
+        # whose stamp cannot be read. A block that records its own age in a
+        # form nothing can parse is not a block to guess the age of: guessing
+        # would hand the band an age measured from the staged write time, which
+        # is exactly the defect requirement 3 exists to fix, and it would do it
+        # silently. The file below is two weeks old, so a fallback would return
+        # a plausible 2.0 rather than fail.
+        path = _aged_file(tmp_path, datetime.now(timezone.utc) - timedelta(weeks=2))
+
+        with pytest.raises(ValueError, match="not-a-date"):
+            weeks_since_rebake({"rebaked_at": "not-a-date"}, path)
+
+
+class TestReportAssembly:
+    def test_the_report_carries_the_whole_guarded_bake_and_round_trips(
+        self, tmp_path: Path
+    ) -> None:
+        # One rebake with every verdict kind in it, as the report publishes it:
+        # the measured global jump 0.193205 -> 0.417031 rejected, node-a inside
+        # the band, node-s measured against the seed, node-b dropped by a
+        # hygiene gate and node-z absent from the capture. The report is a
+        # pure function of those inputs -- no clock, no file -- and strict
+        # JSON: json.dumps(allow_nan=False) accepts it and reading it back
+        # gives the same document, which is what makes it an artifact a later
+        # run or a reviewer can diff.
+        staged = tmp_path / "staged.pt"
+        serving = {
+            "threshold": 0.193205,
+            "per_resource": {"node-a": 0.20, "node-b": 0.21, "node-z": 0.25},
+        }
+
+        report = build_rebake_report(
+            *guard_rebake(
+                serving,
+                0.417031,
+                {"node-a": 0.22, "node-s": 0.21},
+                GUARD_WEEKS,
+                eligibility=_gated_eligibility(),
+                seed_path=_write_seed(tmp_path, "json", per_resource={"node-s": 0.20}),
+            ),
+            GUARD_WEEKS,
+            dry_run=True,
+            staged_path=staged,
+        )
+
+        assert set(report) == {"dry_run", "weeks", "staged_path", "global", "per_resource"}
+        assert report["dry_run"] is True  # a report FIELD, not only an exit code
+        assert report["weeks"] == GUARD_WEEKS
+        assert report["staged_path"] == str(staged)
+
+        assert set(report["global"]) == {"verdict", "old", "proposed", "kept", "ratio", "limit"}
+        assert report["global"]["verdict"] == "REJECTED-grew"
+        assert report["global"]["old"] == 0.193205
+        assert report["global"]["proposed"] == 0.417031
+        assert report["global"]["kept"] == 0.193205  # the rejected jump does not serve
+        assert round(report["global"]["ratio"], 3) == 2.158
+        assert report["global"]["limit"] == pytest.approx(1.5)
+
+        assert list(report["per_resource"]) == ["node-a", "node-b", "node-s", "node-z"]
+        assert {rid: row["verdict"] for rid, row in report["per_resource"].items()} == {
+            "node-a": "accepted",
+            "node-b": "kept-gate-omitted:insufficient-windows:12<50",
+            "node-s": "accepted-seeded",
+            "node-z": "kept-absent-from-capture",
+        }
+        assert report["per_resource"]["node-a"]["kept"] == 0.22  # accepted: the fresh value serves
+        assert report["per_resource"]["node-s"]["old"] == 0.20  # the seeded previous value
+
+        assert json.loads(json.dumps(report, allow_nan=False)) == report
+
+    @pytest.mark.parametrize(
+        ("proposed", "written"),
+        [(math.nan, "nan"), (math.inf, "inf"), (-math.inf, "-inf")],
+        ids=["nan", "inf", "-inf"],
+    )
+    def test_a_rejected_non_finite_proposal_is_written_as_its_name(
+        self, proposed: float, written: str
+    ) -> None:
+        # The guard records a non-finite proposal verbatim, so the number the
+        # report has to publish is one json.dumps writes as bare NaN,
+        # Infinity, or -Infinity -- none of them JSON, and all three refused
+        # outright under allow_nan=False. The report would then be unwritable
+        # for exactly the bake whose rejection most needs recording, so the
+        # value is written as its name instead and the document stays strict.
+        report = build_rebake_report(
+            *guard_rebake(
+                {"threshold": 0.30, "per_resource": {"node-a": 0.20}},
+                proposed,
+                {"node-a": proposed},
+                GUARD_WEEKS,
+            ),
+            GUARD_WEEKS,
+            dry_run=True,
+        )
+
+        row = report["per_resource"]["node-a"]
+        assert report["global"]["verdict"] == "REJECTED-nonfinite"
+        assert report["global"]["proposed"] == written
+        assert row["proposed"] == written
+        assert row["old"] == 0.20
+        assert row["kept"] == 0.20  # the finite previous value is what serves
+        assert row["ratio"] is None  # no band comparison was made
+        assert json.loads(json.dumps(report, allow_nan=False)) == report
+
+    def test_a_kept_row_names_the_threshold_that_resource_keeps(self) -> None:
+        # The report must not read as if an omitted resource serves the global
+        # threshold: node-b was dropped by a hygiene gate and node-z was not in
+        # the capture, and each one goes on serving its own previous value,
+        # which is neither the proposal it never got nor the fresh global. The
+        # verdict alone does not say that -- the row names the kept threshold.
+        report = build_rebake_report(
+            *guard_rebake(
+                {
+                    "threshold": 0.30,
+                    "per_resource": {"node-a": 0.20, "node-b": 0.21, "node-z": 0.25},
+                },
+                0.33,
+                {"node-a": 0.22},
+                GUARD_WEEKS,
+                eligibility=_gated_eligibility(),
+            ),
+            GUARD_WEEKS,
+            dry_run=False,
+        )
+
+        gated = report["per_resource"]["node-b"]
+        absent = report["per_resource"]["node-z"]
+        assert gated["verdict"] == "kept-gate-omitted:insufficient-windows:12<50"
+        assert gated["kept"] == 0.21 == gated["old"]
+        assert gated["proposed"] is None  # nothing was proposed, so nothing was guarded
+        assert absent["verdict"] == "kept-absent-from-capture"
+        assert absent["kept"] == 0.25 == absent["old"]
+        assert report["global"]["kept"] == 0.33  # what the fresh global moved to
+        assert gated["kept"] != report["global"]["kept"]
+
+        assert report["dry_run"] is False
+        assert report["staged_path"] is None  # nothing staged, and the report says so
 
 
 class TestPackageExports:
