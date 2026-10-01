@@ -47,15 +47,25 @@ is not what knows the difference. A resource the bake proposed nothing for
 keeps its serving threshold with the reason it was omitted on its verdict: the
 hygiene gate that dropped it (``kept-gate-omitted:insufficient-windows:12<50``)
 or its absence from the capture altogether (``kept-absent-from-capture``).
+
+``weeks_since_rebake`` is where the band's ``weeks`` comes from, and the
+measured defect it fixes is that a swap's copy/move chain sets the serving
+checkpoint's mtime to the staged write time: a file written minutes ago can
+carry a serving block baked weeks ago, and a band anchored on the file widens
+to match the copy rather than the bake. The stamp the block carries is the
+anchor; the mtime is the fallback for a block that has none. Either way the age
+floors at one day, the narrowest band a same-day rebake can claim.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import sys
 from dataclasses import fields
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType
 
@@ -68,6 +78,7 @@ from scry.eval.calibration import (
     guard_rebake,
     guard_value,
     resolve_old_thresholds,
+    weeks_since_rebake,
 )
 from scry.eval.hygiene import ResourceEligibility, per_resource_eligibility
 from scry.eval.rubric import SpecError
@@ -151,6 +162,27 @@ def _torch_that_must_not_load() -> ModuleType:
 
     module.load = _load  # type: ignore[attr-defined]
     return module
+
+
+AGE_TOLERANCE_WEEKS = 1e-4
+"""About six seconds of slack on an asserted age: no test here turns on less."""
+
+
+def _aged_file(tmp_path: Path, mtime: datetime) -> str:
+    """A stand-in serving checkpoint with ``mtime`` as its modification time.
+
+    The age function stats the path and never reads it, so the bytes are
+    irrelevant and a real checkpoint would only pin that it does not load one.
+    """
+    path = tmp_path / "serving.pt"
+    path.write_bytes(b"")
+    os.utime(path, (mtime.timestamp(), mtime.timestamp()))
+    return str(path)
+
+
+def _stamp(moment: datetime, suffix: str = "Z") -> str:
+    """``moment`` as a serving block records it: ISO-8601 UTC, Z suffix by default."""
+    return moment.isoformat().replace("+00:00", suffix)
 
 
 # One case per unusable kind: the current serving block, and the key it leaves
@@ -804,6 +836,56 @@ class TestComposedGuardPath:
         )
 
         assert [verdict.resource_id for verdict in verdicts] == [None, "node-a", "node-b", "node-c"]
+
+
+class TestAgeAnchor:
+    @pytest.mark.parametrize("suffix", ["Z", "+00:00", ""], ids=["z", "offset", "naive"])
+    def test_the_serving_stamp_anchors_the_age_not_the_file_mtime(
+        self, tmp_path: Path, suffix: str
+    ) -> None:
+        # Requirement 3, the measured defect: the swap's copy/move chain sets
+        # the serving checkpoint's mtime to the staged write time, so the file
+        # here is brand new while the block it carries was baked three weeks
+        # ago. Anchoring on the mtime would claim an age of one day (the floor)
+        # and hand the band a grow limit of 1.059634 instead of 1.5**3 == 3.375
+        # -- the age is read off the block, which is what records the bake.
+        # The three spellings are the same instant: the repo writes the Z form
+        # (scry.eval.provenance._iso_z) and a stamp with no offset at all is
+        # read as UTC, as scripts/extract_features.py reads one.
+        now = datetime.now(timezone.utc)
+        path = _aged_file(tmp_path, now)
+
+        weeks = weeks_since_rebake({"rebaked_at": _stamp(now - timedelta(weeks=3), suffix)}, path)
+
+        assert weeks == pytest.approx(3.0, abs=AGE_TOLERANCE_WEEKS)
+
+    def test_the_file_mtime_is_the_fallback_without_a_stamp(self, tmp_path: Path) -> None:
+        # A serving block baked before this module stamped anything has no
+        # anchor of its own, and the file's own age is the best evidence left.
+        # Two weeks of mtime age is two weeks of band.
+        now = datetime.now(timezone.utc)
+        path = _aged_file(tmp_path, now - timedelta(weeks=2))
+
+        weeks = weeks_since_rebake({"threshold": 0.30, "per_resource": USABLE_A}, path)
+
+        assert weeks == pytest.approx(2.0, abs=AGE_TOLERANCE_WEEKS)
+
+    def test_an_age_under_a_day_floors_at_one_day(self, tmp_path: Path) -> None:
+        # A rebake an hour after the last one does not get an hour-wide band:
+        # the age floors at one day, which is weeks = 1/7 exactly -- the band
+        # TestBandMath pins, grow limit 1.5**(1/7) == 1.059634, where a 1.1x
+        # move is rejected. Without the floor the hour would give weeks =
+        # 1/168 and a limit of 1.0024, and the rebake would be unable to move
+        # a threshold at all.
+        now = datetime.now(timezone.utc)
+        path = _aged_file(tmp_path, now)
+
+        weeks = weeks_since_rebake({"rebaked_at": _stamp(now - timedelta(hours=1))}, path)
+
+        assert weeks == ONE_DAY_IN_WEEKS
+        _, verdict = guard_value(None, 0.2, 0.22, weeks)
+        assert round(verdict.limit, 6) == 1.059634
+        assert verdict.verdict == "REJECTED-grew"
 
 
 class TestPackageExports:

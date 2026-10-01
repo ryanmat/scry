@@ -46,9 +46,15 @@ hygiene gate dropped it, ``kept-absent-from-capture`` when the capture did not
 contain it at all. The two are different operator actions, which is why one
 verdict cannot serve for both.
 
-Age is not read here: callers pass ``weeks`` already anchored and floored (one
-day, i.e. ``weeks = 1/7``, is the youngest band a rebake ever claims). Pure
-arithmetic, no clock.
+``weeks_since_rebake`` supplies the ``weeks`` all of the above take, and is the
+one function here that reads a clock. Age anchors on the stamp the serving
+block carries, because the mtime of the serving checkpoint is the staged write
+time the swap's copy/move chain left behind -- a file minutes old can carry a
+block baked weeks ago, and a band anchored on the file widens to match the copy
+rather than the bake. The mtime is the fallback for a block with no stamp, and
+either way the age floors at one day (``weeks = 1/7``), the narrowest band a
+rebake ever claims. Everything else in this module is pure arithmetic over the
+``weeks`` it returns.
 """
 
 from __future__ import annotations
@@ -56,6 +62,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -89,6 +96,12 @@ _BAND_REJECTIONS = frozenset({VERDICT_REJECTED_GREW, VERDICT_REJECTED_SHRANK})
 
 _ZIP_MAGIC = b"PK\x03\x04"
 """Leading bytes of a zip archive, and so of a torch checkpoint; a JSON seed is text."""
+
+AGE_FLOOR = timedelta(days=1)
+"""Youngest age a rebake may claim, however recently the previous one ran."""
+
+_ONE_WEEK = timedelta(days=7)
+"""The unit ``weeks`` is measured in; the band's exponent is in weeks."""
 
 
 @dataclass(frozen=True)
@@ -526,3 +539,51 @@ def guard_rebake(
         max_weekly_shrink=max_weekly_shrink,
     )
     return kept_global, kept, [_stamp_seeded(verdict, serving) for verdict in verdicts]
+
+
+def _parse_stamp(stamp: str) -> datetime:
+    """An ISO-8601 serving stamp as an aware UTC moment.
+
+    The repo writes UTC with a ``Z`` suffix (``scry.eval.provenance._iso_z``),
+    which ``fromisoformat`` only learned to read in 3.11 while this package
+    supports 3.10, so the suffix is spelled out as an offset first. A stamp
+    carrying no offset at all is read as UTC, as ``scripts/extract_features.py``
+    reads one.
+    """
+    if stamp.endswith("Z"):
+        stamp = f"{stamp[:-1]}+00:00"
+    parsed = datetime.fromisoformat(stamp)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def weeks_since_rebake(serving: Mapping[str, Any], checkpoint_path: str | Path) -> float:
+    """Age of the serving block in weeks, as the band's exponent takes it.
+
+    Requirement 3. The age used to come from the serving checkpoint's mtime,
+    which the swap's copy/move chain sets to the staged write time: the file is
+    then as young as the last swap rather than as old as the bake it carries,
+    and the band -- exponential in this number -- narrows to match the copy. So
+    the stamp the serving block itself carries is the anchor, and the mtime is
+    the fallback for a block written before anything stamped one.
+
+    Args:
+        serving: The current serving block. ``rebaked_at`` is read if present:
+            an ISO-8601 moment, as the staged block records it; one with no
+            offset is read as UTC. A stamp that is not an ISO-8601 string
+            raises rather than falling back, since a block that records its age
+            wrongly is not a block to guess the age of.
+        checkpoint_path: The checkpoint carrying ``serving``, whose mtime is the
+            fallback anchor. Stat'ed, never read.
+
+    Returns:
+        Age in weeks, floored at one day (``1/7``) -- the floor the previous
+        implementation had, and what keeps a rebake minutes after another from
+        claiming a band so narrow that no threshold could move, or a clock skew
+        that puts the stamp in the future from claiming a negative one.
+    """
+    stamp = serving.get("rebaked_at")
+    if stamp is None:
+        anchor = datetime.fromtimestamp(Path(checkpoint_path).stat().st_mtime, tz=timezone.utc)
+    else:
+        anchor = _parse_stamp(stamp)
+    return max(datetime.now(timezone.utc) - anchor, AGE_FLOOR) / _ONE_WEEK
