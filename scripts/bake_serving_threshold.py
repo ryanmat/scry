@@ -56,6 +56,16 @@ from scry.utils.config import get_config
 # different metric (e.g. numerical+categorical error) at a different scale.
 RECON_METRIC = "numerical_mse_from_mu"
 
+# What an omitted resource serves, in both situations: a first bake has nothing
+# for it and it falls back to the global threshold, while a re-bake
+# (scry.eval.calibration) keeps the threshold it is already serving rather than
+# moving it, which the old "it will serve the global threshold" wording promised
+# it would not do.
+OMITTED_FALLBACK = (
+    "It is omitted from the per-resource map: it keeps its previous threshold "
+    "where it has one, and serves the global threshold where it does not."
+)
+
 
 def compute_serving_block(
     keeper: Keeper,
@@ -77,7 +87,7 @@ def compute_serving_block(
             The per-resource quantile is taken over all of that resource's windows
             (no holdout split); the margin carries the cross-day drift headroom.
             A resource whose windows are too few for a meaningful quantile is
-            omitted (it serves the global threshold as fallback).
+            omitted (see ``OMITTED_FALLBACK`` for what it serves instead).
 
     Returns:
         Tuple of the serving block dict and the per-resource eligibility map
@@ -153,22 +163,22 @@ def compute_serving_block(
                     f"warning: resource {rid!r} lacks {len(verdict.missing_features)} trained "
                     f"feature(s) the capture supplies elsewhere "
                     f"({', '.join(verdict.missing_features)}); its bake-time windows are "
-                    "filled at -mean/std where serving fills neutral, so it is "
-                    "omitted from the per-resource map and serves the global "
-                    "threshold.",
+                    f"filled at -mean/std where serving fills neutral. {OMITTED_FALLBACK}",
                     file=sys.stderr,
                 )
             elif reason.startswith(REASON_TOO_FEW_WINDOWS):
                 print(
                     f"warning: resource {rid!r} has only {verdict.n_windows} window(s) "
-                    f"(< {MIN_PER_RESOURCE_WINDOWS}); omitting it from the "
-                    "per-resource map, it will serve the global threshold.",
+                    f"(< {MIN_PER_RESOURCE_WINDOWS}). {OMITTED_FALLBACK}",
                     file=sys.stderr,
                 )
             else:
+                # The quantile gates name themselves: non-finite-quantile or
+                # non-positive-quantile. Calling both "non-positive" sent an
+                # operator looking for a negative number that is not there --
+                # a NaN quantile fails no `<= 0` comparison at all.
                 print(
-                    f"warning: resource {rid!r} has a non-positive healthy quantile; "
-                    "omitting it from the per-resource map.",
+                    f"warning: resource {rid!r} failed the {reason} gate. {OMITTED_FALLBACK}",
                     file=sys.stderr,
                 )
         block["per_resource"] = per_resource

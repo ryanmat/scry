@@ -12,11 +12,14 @@ arithmetic, multi-gate accumulation, stringified key iteration order, and the
 torch-free import contract are pinned separately.
 The bake-delegation tests run the real bake on a gated synthetic fleet and pin
 the printed eligibility map, its agreement with the per_resource map, the
-unchanged stderr warning text, and the compute_serving_block exposure.
+stderr warning text (each warning naming the gate that omitted the resource
+and what the resource serves afterwards), and the compute_serving_block
+exposure.
 """
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 import subprocess
@@ -29,6 +32,7 @@ import pytest
 from synth import PROFILE, gated_fleet_csv
 
 from scry.data.fetcher import fetch_full_capture
+from scry.eval.calibration import DEFAULT_QUANTILE
 from scry.eval.hygiene import (
     MIN_PER_RESOURCE_WINDOWS,
     REASON_DIVERGENT,
@@ -293,17 +297,71 @@ class TestBakeDelegation:
             output=str(tmp_path / "warned.pt"),
         )
         err = capsys.readouterr().err
+        # A re-bake keeps an omitted resource's previous threshold rather than
+        # falling it back to the global one, which the old wording promised it
+        # would; every warning describes both outcomes now.
         assert (
             "lacks 1 trained feature(s) the capture supplies elsewhere "
             "(cpuUsageNanoCores); its bake-time windows are filled at -mean/std "
-            "where serving fills neutral, so it is omitted from the per-resource "
-            "map and serves the global threshold."
+            "where serving fills neutral. It is omitted from the per-resource "
+            "map: it keeps its previous threshold where it has one, and serves "
+            "the global threshold where it does not."
         ) in err
         assert (
-            "has only 12 window(s) (< 50); omitting it from the per-resource map, "
-            "it will serve the global threshold."
+            "has only 12 window(s) (< 50). It is omitted from the per-resource "
+            "map: it keeps its previous threshold where it has one, and serves "
+            "the global threshold where it does not."
         ) in err
         assert err.count("warning: resource") == 2
+
+    async def test_a_non_finite_quantile_warning_names_its_gate(
+        self,
+        keeper_path: str,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # A NaN own-quantile fails the non-finite gate, which no `<= 0` screen
+        # catches, and the warning for it used to call it "a non-positive
+        # healthy quantile" -- sending an operator to look for a negative
+        # number that is not there. The gate's own reason is what the warning
+        # names now. The verdict map is substituted because no healthy capture
+        # produces a NaN quantile on demand; the branch it drives is the real
+        # one, printed by the real bake.
+        healthy = gated_fleet_csv(tmp_path)
+        keeper = bake_mod.load_keeper(keeper_path)
+        df_long = await fetch_full_capture(healthy, profile=PROFILE)
+        monkeypatch.setattr(
+            bake_mod,
+            "per_resource_eligibility",
+            lambda **kwargs: {
+                rid: ResourceEligibility(
+                    resource_id=rid,
+                    eligible=False,
+                    reasons=[f"{REASON_NONFINITE_QUANTILE}:nan"],
+                    n_windows=60,
+                    own_quantile=float("nan"),
+                    missing_features=[],
+                )
+                for rid in ("node-a", "node-b", "node-c")
+            },
+        )
+
+        serving, _ = bake_mod.compute_serving_block(
+            keeper, df_long, quantile=0.99, step=10, per_resource_margin=2.0
+        )
+
+        err = capsys.readouterr().err
+        assert serving["per_resource"] == {}  # every resource failed the gate
+        assert err.count(f"failed the {REASON_NONFINITE_QUANTILE}:nan gate") == 3
+        assert "non-positive healthy quantile" not in err
+        assert "it keeps its previous threshold where it has one" in err
+
+    def test_the_rebake_takes_the_quantile_the_bake_takes(self) -> None:
+        # calibration.DEFAULT_QUANTILE is written out rather than imported,
+        # since the bake is a script the package reaches only lazily; this
+        # pins the copy to bake()'s own default so the two cannot drift apart.
+        assert DEFAULT_QUANTILE == inspect.signature(bake_mod.bake).parameters["quantile"].default
 
     def test_bake_module_delegates_to_hygiene(self) -> None:
         assert bake_mod.per_resource_eligibility is per_resource_eligibility

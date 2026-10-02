@@ -56,6 +56,12 @@ to match the copy rather than the bake. The stamp the block carries is the
 anchor; the mtime is the fallback for a block that has none. Either way the age
 floors at one day, the narrowest band a same-day rebake can claim.
 
+``run_calibration`` is the whole of it composed against a real keeper and a
+real capture: the bake proposes, the band decides, the age anchor supplies the
+weeks, and what comes back is the report beside the serving block that would be
+staged -- in memory, with the base checkpoint byte-identical afterwards, since
+writing anything at all is the staging step's and the swap's business.
+
 ``build_rebake_report`` assembles what an operator reads afterwards, and is
 pinned on the two things a report of a rejection has to survive. It is strict
 JSON: the proposal a ``REJECTED-nonfinite`` verdict rejected is written as
@@ -68,6 +74,7 @@ falling back to the global one.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -78,8 +85,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType
 
+import bake_serving_threshold as bake_mod
 import numpy as np
 import pytest
+from synth import PROFILE, gated_fleet_csv
 
 from scry.eval.calibration import (
     GuardVerdict,
@@ -88,10 +97,12 @@ from scry.eval.calibration import (
     guard_rebake,
     guard_value,
     resolve_old_thresholds,
+    run_calibration,
     weeks_since_rebake,
 )
 from scry.eval.hygiene import ResourceEligibility, per_resource_eligibility
 from scry.eval.rubric import SpecError
+from scry.utils.config import get_config
 
 ONE_DAY_IN_WEEKS = 1.0 / 7.0
 """The age floor of one day expressed in weeks: ``max(age, 1 day) / 7``."""
@@ -193,6 +204,62 @@ def _aged_file(tmp_path: Path, mtime: datetime) -> str:
 def _stamp(moment: datetime, suffix: str = "Z") -> str:
     """``moment`` as a serving block records it: ISO-8601 UTC, Z suffix by default."""
     return moment.isoformat().replace("+00:00", suffix)
+
+
+STALE_WEEKS = 26.0
+"""Age of the serving block the run test carries.
+
+Half a year of it puts the band (grow ``1.5**26``, shrink ``1/1.35**26``)
+around any threshold the tiny keeper bakes, so the composed run turns on what
+it composes rather than on arithmetic ``TestBandMath`` already pins.
+"""
+
+BASE_GLOBAL = 0.20
+"""The global threshold the base checkpoint of the run test is serving."""
+
+TINY_THRESHOLD = 1e-6
+"""A served threshold orders of magnitude under any the tiny keeper bakes.
+
+Usable (finite, positive), so nothing is seeded for it, and so far under a
+real proposal that no band the age floor allows -- grow ``1.5 ** (1 / 7)`` --
+can accept the proposal: the rejected direction of the run, on demand.
+"""
+
+BASE_PROVENANCE = {"quantile": 0.5, "healthy_fpr": 0.25, "n_calibration_windows": 7}
+"""The fit the base checkpoint's global came from, as its serving block records it.
+
+Values no real bake of the fixture produces (the bake takes 0.99 and sees
+dozens of windows), so a block that carries them took them from the serving
+block, and one that does not took them from the bake.
+"""
+
+
+def _base_checkpoint(
+    keeper_path: str,
+    tmp_path: Path,
+    per_resource: dict[str, float],
+    *,
+    threshold: float = BASE_GLOBAL,
+    age: timedelta = timedelta(weeks=STALE_WEEKS),
+) -> str:
+    """The keeper plus an ``age``-old serving block: what a rebake reads."""
+    import torch  # local: the test module, like calibration.py, stays torch-free to import
+
+    checkpoint = torch.load(keeper_path, map_location="cpu", weights_only=False)
+    checkpoint["serving"] = {
+        "threshold": threshold,
+        **BASE_PROVENANCE,
+        "per_resource": per_resource,
+        "rebaked_at": _stamp(datetime.now(timezone.utc) - age),
+    }
+    path = tmp_path / "serving.pt"
+    torch.save(checkpoint, path)
+    return str(path)
+
+
+def _digest(path: str) -> str:
+    """The file's bytes as one hash: what "the input is untouched" is measured by."""
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 # One case per unusable kind: the current serving block, and the key it leaves
@@ -594,16 +661,17 @@ class TestSeedResolution:
         # check_guards takes the whole previous map, not only the keys the bake
         # proposed: node-z, dropped by this capture, is an omission for the
         # report to record, and dropping it here would hide it. Nothing needs a
-        # seed when every current value is usable. What does not survive is an
-        # unusable entry -- every value in the resolved map is one the band
-        # could measure against -- and node-y has no proposal to guard anyway.
+        # seed when every current value is usable -- and node-y's unusable 0.0
+        # is carried as it stands, since no band will measure against a
+        # resource nothing was proposed for, while dropping it would drop the
+        # one record that it is still serving that value.
         old_global, old = resolve_old_thresholds(
             {"threshold": 0.30, "per_resource": {"node-a": 0.20, "node-z": 0.25, "node-y": 0.0}},
             ["node-a"],
         )
 
         assert old_global == 0.30
-        assert old == {"node-a": 0.20, "node-z": 0.25}
+        assert old == {"node-a": 0.20, "node-z": 0.25, "node-y": 0.0}
 
 
 class TestComposedGuardPath:
@@ -739,6 +807,48 @@ class TestComposedGuardPath:
         by_resource = {verdict.resource_id: verdict for verdict in verdicts}
         assert by_resource["node-b"].verdict == "kept-absent-from-capture"
         assert kept == {"node-a": 0.22, "node-b": 0.21}
+
+    @pytest.mark.parametrize(
+        ("value", "written", "kind"),
+        [
+            (math.nan, "nan", "nan"),
+            (math.inf, "inf", "inf"),
+            (-math.inf, "-inf", "-inf"),
+            (0.0, 0.0, "zero"),
+            (-0.2, -0.2, "negative"),
+            (None, None, "null"),
+        ],
+        ids=["nan", "inf", "-inf", "zero", "negative", "null"],
+    )
+    def test_an_unusable_serving_value_with_no_proposal_falls_to_the_global_on_the_record(
+        self, value: float | None, written: float | str | None, kind: str
+    ) -> None:
+        # The last silent omission under requirement 4: a serving entry whose
+        # value the predictor refuses -- and that this bake proposed nothing
+        # for -- was dropped during resolution, before the guard could see it,
+        # so the report carried no row for it while the resource served the
+        # global. The predictor still serves the global for it (it drops the
+        # entry, as the parity assertion below pins), so the map that stays in
+        # force leaves it out the same way, and what the report adds is the
+        # record: a row naming the unusable value, why it is unusable, and the
+        # global as what serves. A row that said the resource kept NaN would
+        # be the misreading `kept` exists to prevent.
+        from scry.api.predictor import Predictor  # local: pulls in torch
+
+        serving = {"threshold": 0.30, "per_resource": {"node-a": 0.20, "node-z": value}}
+        kept_global, kept, verdicts = guard_rebake(serving, 0.33, {"node-a": 0.22}, GUARD_WEEKS)
+        report = build_rebake_report(kept_global, kept, verdicts, GUARD_WEEKS, dry_run=True)
+
+        assert kept == {"node-a": 0.22}  # node-z is not staged, as the predictor would not serve it
+        assert set(kept) == set(
+            Predictor._resolve_per_resource_thresholds({"per_resource": {**kept, "node-z": value}})
+        )
+        row = report["per_resource"]["node-z"]
+        assert row["verdict"] == f"kept-global-unusable:{kind}"
+        assert row["old"] == written
+        assert row["kept"] == report["global"]["kept"] == 0.33  # the global is what serves
+        assert report["per_resource"]["node-a"]["verdict"] == "accepted"  # the guarded one stands
+        assert json.loads(json.dumps(report, allow_nan=False)) == report
 
     def test_a_seeded_global_and_an_unusable_serving_value_are_stamped(
         self, tmp_path: Path
@@ -1054,6 +1164,237 @@ class TestReportAssembly:
 
         assert report["dry_run"] is False
         assert report["staged_path"] is None  # nothing staged, and the report says so
+
+
+class TestCalibrationRun:
+    def test_the_run_bakes_guards_and_reports_without_writing_anything(
+        self, keeper_path: str, tmp_path: Path
+    ) -> None:
+        # The composed run against a real keeper and a real capture: the bake
+        # proposes (its own arithmetic, run against the BASE model), the band
+        # decides through guard_rebake so a seeded old is stamped, the age
+        # anchor supplies the weeks, and the report comes back beside the
+        # serving block that would be staged. Nothing is written and the base
+        # checkpoint is byte-identical afterwards: a run that moved the live
+        # thresholds before anyone read its report is the failure the
+        # stage-then-swap separation exists to prevent. The gated fleet makes
+        # the bake propose for node-a alone -- node-b loses a trained feature
+        # the capture supplies elsewhere, node-c has 12 windows -- and node-a
+        # is the resource the serving block has nothing for, so the seed is
+        # what its band measures against.
+        model = _base_checkpoint(keeper_path, tmp_path, {"node-b": 0.21, "node-c": 0.22})
+        healthy = gated_fleet_csv(tmp_path)
+        seed = _write_seed(tmp_path, "json", per_resource={"node-a": 0.20})
+        digest, listing = _digest(model), sorted(path.name for path in tmp_path.iterdir())
+
+        report, block = run_calibration(
+            model, healthy, profile=PROFILE, seed_path=seed, calibration_days=7.0
+        )
+
+        assert report["weeks"] == pytest.approx(STALE_WEEKS, abs=AGE_TOLERANCE_WEEKS)
+        assert report["global"]["verdict"] == "accepted"
+        assert report["global"]["old"] == BASE_GLOBAL  # the serving global, not the seed's
+        assert report["global"]["proposed"] > 0.0  # a real bake of the capture above
+        assert {rid: row["verdict"] for rid, row in report["per_resource"].items()} == {
+            "node-a": "accepted-seeded",  # its old came from the seed, not from serving
+            "node-b": "kept-gate-omitted:divergent-coverage:cpuUsageNanoCores",
+            "node-c": "kept-gate-omitted:insufficient-windows:12<50",
+        }
+
+        assert block["threshold"] == report["global"]["kept"]
+        assert block["per_resource"] == {
+            rid: row["kept"] for rid, row in report["per_resource"].items()
+        }
+        assert block["margin_multiplier"] == 2.0  # the default margin, on the staged block
+        assert block["calibration_days"] == 7.0
+        assert block["rebaked_at"] == report["generated_at"]
+        assert block["recon_metric"] == "numerical_mse_from_mu"  # the bake's own fields survive
+        # An accepted global carries the fit that produced it: this bake's.
+        assert block["quantile"] == 0.99
+        assert block["n_calibration_windows"] > BASE_PROVENANCE["n_calibration_windows"]
+        assert block["healthy_fpr"] != BASE_PROVENANCE["healthy_fpr"]
+
+        assert _digest(model) == digest  # the base checkpoint is untouched
+        assert sorted(path.name for path in tmp_path.iterdir()) == listing  # and nothing is staged
+        assert json.loads(json.dumps(report, allow_nan=False)) == report
+
+    def test_the_report_carries_the_run_level_keys_by_name(
+        self, keeper_path: str, tmp_path: Path
+    ) -> None:
+        # Everything the untracked rebake report recorded is recorded here too
+        # (Ryan's ruling of 2026-10-01): the run's own inputs, the warnings the
+        # bake printed, and the two counts a reader scans first -- what this
+        # rebake left out, and how many proposals it refused.
+        model = _base_checkpoint(
+            keeper_path, tmp_path, {"node-a": 0.20, "node-b": 0.21, "node-c": 0.22}
+        )
+        healthy = gated_fleet_csv(tmp_path)
+
+        report, _ = run_calibration(
+            model,
+            healthy,
+            profile=PROFILE,
+            margin=2.5,
+            quantile=0.95,
+            calibration_days=7.0,
+            allow_drift=True,
+            dry_run=False,
+        )
+
+        assert set(report) == {
+            "dry_run",
+            "weeks",
+            "staged_path",
+            "global",
+            "per_resource",
+            "generated_at",
+            "calibration",
+            "calibration_days",
+            "margin",
+            "quantile",
+            "allow_drift",
+            "omitted",
+            "global_kept",
+            "bake_warnings",
+            "rejected_count",
+        }
+        assert report["calibration"] == healthy
+        assert report["calibration_days"] == 7.0
+        assert report["margin"] == 2.5
+        assert report["quantile"] == 0.95
+        assert report["allow_drift"] is True
+        assert report["dry_run"] is False
+        assert report["omitted"] == ["node-b", "node-c"]  # no proposal reached the band
+        assert report["global_kept"] is False  # the fresh global is what serves
+        assert report["rejected_count"] == 0
+        assert len(report["bake_warnings"]) == 2  # the bake's stderr, carried into the report
+        assert all(line.startswith("warning: resource ") for line in report["bake_warnings"])
+
+        stamped = datetime.fromisoformat(report["generated_at"].replace("Z", "+00:00"))
+        assert abs((datetime.now(timezone.utc) - stamped).total_seconds()) < 300
+        assert json.loads(json.dumps(report, allow_nan=False)) == report
+
+    def test_a_rejected_proposal_keeps_the_old_value_and_the_report_counts_it(
+        self, keeper_path: str, tmp_path: Path
+    ) -> None:
+        # The direction the two runs above never take. A serving block stamped
+        # just now ages to the one-day floor, where the band is about six
+        # percent either way, and TINY_THRESHOLD sits orders of magnitude under
+        # anything a real bake of the gated fleet proposes: the global is
+        # REJECTED-grew, and node-a, served at the same value with a real
+        # proposal against it, is refused the same way. What matters is what
+        # comes back beside the report -- the block that would be staged
+        # carries the GUARDED values, the old global and the old node-a, not
+        # the bake's -- and that the report says so: global_kept True, two
+        # refusals counted. No seed: every old value is usable, so nothing is
+        # seeded, and node-b and node-c, with neither a previous threshold nor
+        # a proposal, have no row.
+        model = _base_checkpoint(
+            keeper_path,
+            tmp_path,
+            {"node-a": TINY_THRESHOLD},
+            threshold=TINY_THRESHOLD,
+            age=timedelta(0),
+        )
+        healthy = gated_fleet_csv(tmp_path)
+
+        report, block = run_calibration(model, healthy, profile=PROFILE)
+
+        assert report["weeks"] == pytest.approx(ONE_DAY_IN_WEEKS, abs=AGE_TOLERANCE_WEEKS)
+        assert report["global"]["verdict"] == "REJECTED-grew"
+        assert report["global"]["kept"] == report["global"]["old"] == TINY_THRESHOLD
+        assert report["global"]["proposed"] > TINY_THRESHOLD  # a real bake, refused
+        assert {rid: row["verdict"] for rid, row in report["per_resource"].items()} == {
+            "node-a": "REJECTED-grew"
+        }
+        assert report["global_kept"] is True  # the previous global is what stays in force
+        assert report["rejected_count"] == 2  # the global and node-a
+        assert report["omitted"] == []  # nothing was omitted that had a previous threshold
+
+        assert block["threshold"] == TINY_THRESHOLD  # the guarded global, not the bake's
+        assert block["per_resource"] == {"node-a": TINY_THRESHOLD}  # likewise per resource
+        # A kept global keeps its own provenance, not the refused fit's.
+        assert {key: block[key] for key in BASE_PROVENANCE} == BASE_PROVENANCE
+        assert json.loads(json.dumps(report, allow_nan=False)) == report
+
+    @pytest.mark.parametrize(
+        ("proposed", "allow_drift", "verdict", "rejected", "global_kept"),
+        [
+            (math.nan, False, "REJECTED-nonfinite", 2, True),
+            (10 * BASE_GLOBAL, True, "accepted-allow-drift", 0, False),
+        ],
+        ids=["nonfinite-refused", "drift-allowed"],
+    )
+    def test_the_run_hands_the_bake_its_parameters_and_the_guard_its_flag(
+        self,
+        keeper_path: str,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+        proposed: float,
+        allow_drift: bool,
+        verdict: str,
+        rejected: int,
+        global_kept: bool,
+    ) -> None:
+        # The plumbing the composed runs above cannot see. A real bake of the
+        # fixture never proposes a non-finite value, and the other runs take a
+        # band that accepts whatever it proposes, so a run that ignored its
+        # quantile, its margin, or its allow_drift, or that reported inputs the
+        # bake never used, passed them all. The bake is replaced by a recorder
+        # returning a block in the real bake's shape (its keys are the ones
+        # compute_serving_block writes); everything around it is real: the
+        # checkpoint, the capture fetch, the guard, the report.
+        seen: dict[str, object] = {}
+
+        def recording_bake(keeper, df_long, *, quantile, step, per_resource_margin):
+            seen.update(quantile=quantile, step=step, per_resource_margin=per_resource_margin)
+            print(
+                "warning: resource 'node-b' failed the non-finite-quantile:nan gate.",
+                file=sys.stderr,
+            )
+            block = {
+                "threshold": proposed,
+                "quantile": quantile,
+                "healthy_fpr": 0.01,
+                "n_calibration_windows": 60,
+                "recon_metric": "numerical_mse_from_mu",
+                "per_resource": {"node-a": proposed},
+                "margin_multiplier": per_resource_margin,
+            }
+            return block, {}
+
+        monkeypatch.setattr(bake_mod, "compute_serving_block", recording_bake)
+        model = _base_checkpoint(keeper_path, tmp_path, {"node-a": BASE_GLOBAL}, age=timedelta(0))
+        healthy = gated_fleet_csv(tmp_path)
+
+        report, block = run_calibration(
+            model, healthy, profile=PROFILE, quantile=0.95, margin=2.5, allow_drift=allow_drift
+        )
+
+        assert seen == {
+            "quantile": 0.95,
+            "step": int(get_config().window_step),
+            "per_resource_margin": 2.5,
+        }
+        assert report["quantile"] == 0.95 and report["margin"] == 2.5
+        assert report["global"]["verdict"] == verdict
+        assert report["per_resource"]["node-a"]["verdict"] == verdict
+        assert report["rejected_count"] == rejected
+        assert report["global_kept"] is global_kept
+        assert report["bake_warnings"] == [
+            "warning: resource 'node-b' failed the non-finite-quantile:nan gate."
+        ]
+        assert report["bake_warnings"][0] in capsys.readouterr().err  # re-emitted, not swallowed
+        # The block's provenance follows the global that stays in force.
+        expected = (
+            BASE_PROVENANCE
+            if global_kept
+            else {"quantile": 0.95, "healthy_fpr": 0.01, "n_calibration_windows": 60}
+        )
+        assert {key: block[key] for key in BASE_PROVENANCE} == expected
+        assert block["threshold"] == report["global"]["kept"]
+        assert json.loads(json.dumps(report, allow_nan=False)) == report
 
 
 class TestPackageExports:
