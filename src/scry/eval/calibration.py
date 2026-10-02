@@ -1,5 +1,5 @@
 # Description: Guarded serving-threshold recalibration: the per-week band and its verdicts.
-# Description: Reads the seed file, importing torch lazily; the band itself is pure arithmetic.
+# Description: Reads the seed and checkpoint and runs the bake lazily; the band is pure arithmetic.
 
 """Band guards for a recalibrated serving threshold.
 
@@ -33,8 +33,8 @@ anything else -- an empty serving map on a first bake, a NaN that turns the band
 off, an infinity that keeps itself in force forever, a zero that divides by
 zero, a negative that is no threshold at all -- counts as missing and must be
 supplied by an explicit ``--seed``. Absent that, the run is a spec error rather
-than an unguarded bake. That resolution is the only I/O in this module (it reads
-the seed file); the guard itself stays pure.
+than an unguarded bake. That resolution reads the seed file; the guard itself
+stays pure.
 
 ``guard_rebake`` composes the three: resolve, guard, then stamp the provenance
 the band cannot know. A threshold measured against a seed is ``accepted-seeded``
@@ -44,16 +44,20 @@ serving resource the bake proposed nothing for keeps its threshold and records
 why: ``kept-gate-omitted:{reason}`` when the bake's eligibility map shows a
 hygiene gate dropped it, ``kept-absent-from-capture`` when the capture did not
 contain it at all. The two are different operator actions, which is why one
-verdict cannot serve for both.
+verdict cannot serve for both. A serving entry the bake proposed nothing for
+whose value the predictor would refuse -- non-finite, zero, negative, or null --
+is ``kept-global-unusable:{kind}``: ``Predictor._resolve_per_resource_thresholds``
+drops such an entry and serves the global, so the map that stays in force
+leaves it out the same way and its row names the global as what serves.
 
-``weeks_since_rebake`` supplies the ``weeks`` all of the above take, and is the
-one function here that reads a clock. Age anchors on the stamp the serving
+``weeks_since_rebake`` supplies the ``weeks`` all of the above take, and reads
+the clock for that age. Age anchors on the stamp the serving
 block carries, because the mtime of the serving checkpoint is the staged write
 time the swap's copy/move chain left behind -- a file minutes old can carry a
 block baked weeks ago, and a band anchored on the file widens to match the copy
 rather than the bake. The mtime is the fallback for a block with no stamp, and
 either way the age floors at one day (``weeks = 1/7``), the narrowest band a
-rebake ever claims. Everything else in this module is pure arithmetic over the
+rebake ever claims. The guard and the report are pure arithmetic over the
 ``weeks`` it returns.
 
 ``build_rebake_report`` turns all of that into the document an operator reads:
@@ -66,12 +70,27 @@ The report is strict JSON: a non-finite proposal, which ``json.dumps`` would
 otherwise write as a bare ``NaN`` that no strict reader accepts, is recorded as
 ``"nan"``, ``"inf"``, or ``"-inf"``, so the one artifact that records a
 non-finite rejection can always be written.
+
+``run_calibration`` is the run itself, composed from all of the above, and the
+module's I/O: it loads the checkpoint, fetches the capture, runs the bake's own
+arithmetic against the base model, reads the clock once for ``generated_at``,
+then applies the age anchor, the guard, and the report -- which carries the
+run's inputs and the bake's warnings beside the verdicts, so the document says
+what was baked, from what, and how much of it was refused. It returns that
+report and the serving block a swap would put in force, both in memory: the
+checkpoint an operator is serving cannot change before anyone has read what the
+rebake decided. A kept global keeps the provenance of the fit that produced it
+(``quantile``, ``healthy_fpr``, ``n_calibration_windows``), not the discarded
+fit's.
 """
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import math
+import sys
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -102,11 +121,32 @@ VERDICT_KEPT_GATE_OMITTED = "kept-gate-omitted"
 
 VERDICT_KEPT_ABSENT_FROM_CAPTURE = "kept-absent-from-capture"
 
+VERDICT_KEPT_GLOBAL_UNUSABLE = "kept-global-unusable"
+"""Prefix; the full verdict is ``kept-global-unusable:{kind}``, the kind of unusable value.
+
+A serving entry the bake proposed nothing for and whose recorded value the
+predictor refuses (``nan``, ``inf``, ``-inf``, ``zero``, ``negative``, ``null``).
+The predictor serves the global for it, so the map that stays in force leaves
+it out, and the row's ``kept`` is the global.
+"""
+
+_GLOBAL_PROVENANCE = ("quantile", "healthy_fpr", "n_calibration_windows")
+"""The serving-block keys that describe the fit a global threshold came from."""
+
 _BAND_REJECTIONS = frozenset({VERDICT_REJECTED_GREW, VERDICT_REJECTED_SHRANK})
 """The verdicts ``allow_drift`` may override: a band decision, and only that."""
 
+_REJECTIONS = _BAND_REJECTIONS | {VERDICT_REJECTED_NONFINITE}
+"""Every refusal, band or non-finite; the report counts them at the top."""
+
 _ZIP_MAGIC = b"PK\x03\x04"
 """Leading bytes of a zip archive, and so of a torch checkpoint; a JSON seed is text."""
+
+DEFAULT_QUANTILE = 0.99
+"""Healthy-window quantile the bake takes, as ``scripts/bake_serving_threshold.py`` has it."""
+
+DEFAULT_MARGIN = 2.0
+"""Per-resource margin on each resource's own healthy quantile; the sweep's selection."""
 
 AGE_FLOOR = timedelta(days=1)
 """Youngest age a rebake may claim, however recently the previous one ran."""
@@ -261,7 +301,7 @@ def _omission_verdict(
 
 def check_guards(
     old_global: float | None,
-    old: Mapping[str, float],
+    old: Mapping[str, float | None],
     new_global: float,
     new: Mapping[str, float],
     weeks: float,
@@ -306,7 +346,10 @@ def check_guards(
         order. A resource in ``old`` with no proposal in ``new`` keeps its
         previous threshold, since dropping it from the map would fall the
         resource back to the global with no verdict saying so, and its verdict
-        records why it was omitted (``eligibility``).
+        records why it was omitted (``eligibility``). Where that previous value
+        is one the predictor refuses (non-finite, zero, negative, or null) the
+        resource is left out of ``kept``, as the predictor leaves it out, and
+        its verdict is ``kept-global-unusable:{kind}``.
     """
     kept_global, global_verdict = _guard_one(
         None,
@@ -329,6 +372,18 @@ def check_guards(
                 allow_drift=allow_drift,
                 max_weekly_growth=max_weekly_growth,
                 max_weekly_shrink=max_weekly_shrink,
+            )
+        elif _usable(old[resource_id]) is None:
+            # The predictor drops a per-resource threshold it cannot serve and
+            # falls the resource back to the global; the map that stays in
+            # force does the same, and the row says which value it was.
+            verdict = GuardVerdict(
+                resource_id=resource_id,
+                verdict=f"{VERDICT_KEPT_GLOBAL_UNUSABLE}:{_unusable_kind(old[resource_id])}",
+                old=old[resource_id],
+                proposed=None,
+                ratio=None,
+                limit=None,
             )
         else:
             kept[resource_id] = old[resource_id]
@@ -357,6 +412,26 @@ def _usable(value: float | None) -> float | None:
     if not math.isfinite(number) or number <= 0.0:
         return None
     return number
+
+
+def _unusable_kind(value: float | None) -> str:
+    """Why ``_usable`` refused ``value``, as the verdict suffix names it.
+
+    One of ``null``, ``nan``, ``inf``, ``-inf``, ``zero``, or ``negative``; a
+    usable value raises ``ValueError``, since no verdict names one.
+    """
+    if value is None:
+        return "null"
+    number = float(value)
+    if math.isnan(number):
+        return "nan"
+    if math.isinf(number):
+        return "inf" if number > 0 else "-inf"
+    if number == 0.0:
+        return "zero"
+    if number < 0.0:
+        return "negative"
+    raise ValueError(f"{value!r} is a usable threshold")
 
 
 def _read_seed(seed_path: str | Path) -> tuple[float | None, Mapping[str, float]]:
@@ -420,7 +495,7 @@ def resolve_old_thresholds(
     resource_ids: Iterable[str],
     *,
     seed_path: str | Path | None = None,
-) -> tuple[float, dict[str, float]]:
+) -> tuple[float, dict[str, float | None]]:
     """Resolve the ``(old_global, old)`` a rebake is guarded against.
 
     Requirement 1, upstream of ``check_guards``: every value the guard needs
@@ -440,10 +515,10 @@ def resolve_old_thresholds(
 
     Returns:
         ``(old_global, old)``, the inputs ``check_guards`` takes: a positive
-        finite global, and a per-resource map covering every id in
-        ``resource_ids`` plus every other usable entry of the serving map (a
-        resource the bake did not propose is an omission for the report to
-        record, not one to drop here).
+        finite global, a value the band can measure against for every id in
+        ``resource_ids``, and every other entry of the serving map as it
+        stands, usable or not -- a resource the bake did not propose is an
+        omission for the report to record, not one to drop here.
 
     Raises:
         SpecError: If any needed value is neither usable in ``serving`` nor
@@ -456,7 +531,7 @@ def resolve_old_thresholds(
     seed_global, seed_per_resource = (None, {}) if seed_path is None else _read_seed(seed_path)
 
     old_global = _resolve_one("global", serving.get("threshold"), seed_global, seed_path)
-    old: dict[str, float] = {
+    old: dict[str, float | None] = {
         resource_id: _resolve_one(
             resource_id,
             current_per_resource.get(resource_id),
@@ -467,9 +542,13 @@ def resolve_old_thresholds(
     }
     for resource_id, value in current_per_resource.items():
         if resource_id not in old:
-            usable = _usable(value)
-            if usable is not None:
-                old[resource_id] = usable
+            # Carried as recorded, usable or not: nothing proposed a threshold
+            # for this resource, so no band measures against the value, while
+            # screening it out here would drop its omission verdict with it and
+            # fall the resource back to the global threshold with nothing in
+            # the report saying so (requirement 4). check_guards decides what
+            # an unusable one means.
+            old[resource_id] = value
 
     return old_global, old
 
@@ -629,7 +708,8 @@ def _verdict_row(verdict: GuardVerdict, kept: float) -> dict[str, Any]:
     rejected one serves the previous value, and an omitted one serves the
     previous value as well -- which is the row that most needs saying so, since
     a reader who sees no threshold for a resource would otherwise take it to
-    have fallen back to the global one.
+    have fallen back to the global one. The one omitted row that does fall back,
+    ``kept-global-unusable``, says so by carrying the global as ``kept``.
     """
     return {
         "verdict": verdict.verdict,
@@ -652,13 +732,14 @@ def build_rebake_report(
 ) -> dict[str, Any]:
     """Assemble the rebake report from a guarded bake.
 
-    The untracked report's shape extended, not replaced: section 10 carries
-    over the globals and a verdict per resource recording old, proposed,
-    ratio, and limit, and this adds the threshold each row keeps, the age the
-    band was measured over, where the bake was staged, and ``dry_run`` as a
-    field of the document rather than a property of the exit code (requirement
-    5 -- one code can no longer mean both a dry run and a live swap that
-    partially held, so the report has to say which this was).
+    One row per guarded value -- the global its own row, the resources a map of
+    them -- carrying the verdict, the numbers it was decided from, and the
+    threshold the row keeps; around them the age the band was measured over,
+    where the bake was staged, and ``dry_run`` as a field of the document
+    rather than a property of the exit code (requirement 5 -- one code can no
+    longer mean both a dry run and a live swap that partially held, so the
+    report has to say which this was). ``run_calibration`` adds the run-level
+    keys: what was baked, from what, and how much of it was refused.
 
     A pure function of its arguments: no clock, no file, nothing read. Every
     number goes through the strict-JSON encoding above, so the result always
@@ -666,8 +747,9 @@ def build_rebake_report(
 
     Args:
         kept_global: The global threshold that stays in force.
-        kept: The per-resource thresholds that stay in force. Must cover every
-            resource in ``verdicts``, as ``check_guards`` returns it.
+        kept: The per-resource thresholds that stay in force, as
+            ``check_guards`` returns it: every resource in ``verdicts`` except
+            a ``kept-global-unusable`` one, whose row carries ``kept_global``.
         verdicts: The verdicts of this rebake, from ``check_guards`` or
             ``guard_rebake``: the global as ``resource_id=None``, then the
             resources in sorted order, which is the order published here.
@@ -690,7 +772,9 @@ def build_rebake_report(
         if verdict.resource_id is None:
             global_row = _verdict_row(verdict, kept_global)
         else:
-            per_resource[verdict.resource_id] = _verdict_row(verdict, kept[verdict.resource_id])
+            per_resource[verdict.resource_id] = _verdict_row(
+                verdict, kept.get(verdict.resource_id, kept_global)
+            )
 
     return {
         "dry_run": bool(dry_run),
@@ -698,4 +782,166 @@ def build_rebake_report(
         "staged_path": None if staged_path is None else str(staged_path),
         "global": global_row,
         "per_resource": per_resource,
+    }
+
+
+def _bake(
+    model_path: str | Path,
+    calibration: str,
+    *,
+    profile: str | None,
+    quantile: float,
+    margin: float,
+) -> tuple[dict[str, Any], Mapping[str, ResourceEligibility] | None, list[str]]:
+    """Bake against the BASE model and take the serving block it would write.
+
+    The arithmetic is ``scripts/bake_serving_threshold.py``'s own rather than a
+    second copy of it here to drift from it -- the reason the bake delegates its
+    gates to ``scry.eval.hygiene`` instead of keeping its own. Its CLI writes
+    the block into a checkpoint; this takes the block itself, so a proposal can
+    be guarded before anything at all is written. Returned beside it: the
+    hygiene verdicts behind its ``per_resource`` map (omission provenance,
+    requirement 4), and the warning lines it printed, which name the resources
+    it could not propose for and are re-emitted on stderr as well as reported.
+    """
+    import asyncio
+
+    # local: load_keeper pulls in torch, and this module stays importable
+    # without it, as _serving_block's import says.
+    from scry.data.fetcher import fetch_full_capture
+    from scry.model.checkpoint import load_keeper
+    from scry.utils.config import get_config
+
+    # The scripts directory is not a package: it is already importable when the
+    # rebake CLI runs beside it (and under the test suite), and is added from
+    # this checkout otherwise.
+    scripts = Path(__file__).resolve().parents[3] / "scripts"
+    if scripts.is_dir() and str(scripts) not in sys.path:
+        sys.path.append(str(scripts))
+    import bake_serving_threshold
+
+    keeper = load_keeper(str(model_path))
+    df_long = asyncio.run(fetch_full_capture(calibration, profile=profile or keeper.profile))
+    stderr = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(stderr):
+            block, eligibility = bake_serving_threshold.compute_serving_block(
+                keeper,
+                df_long,
+                quantile=quantile,
+                step=int(get_config().window_step),
+                per_resource_margin=margin,
+            )
+    finally:
+        # Re-emitted whether or not the bake finished: what it printed before
+        # raising is the operator's only trace of why.
+        sys.stderr.write(stderr.getvalue())
+    printed = stderr.getvalue().splitlines()
+    return block, eligibility, [line for line in printed if line.startswith("warning: ")]
+
+
+def _serving_block(model_path: str | Path) -> dict[str, Any]:
+    """The serving block the checkpoint carries today, or ``{}`` where it has none."""
+    import torch  # local: this module stays importable without torch
+
+    checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
+    return dict(checkpoint.get("serving") or {})
+
+
+def run_calibration(
+    model_path: str | Path,
+    calibration: str,
+    *,
+    profile: str | None = None,
+    quantile: float = DEFAULT_QUANTILE,
+    margin: float = DEFAULT_MARGIN,
+    calibration_days: float | None = None,
+    seed_path: str | Path | None = None,
+    allow_drift: bool = False,
+    dry_run: bool = True,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Bake, guard, and report a recalibration, in memory.
+
+    Age the serving block the checkpoint carries, bake a fresh one against that
+    same checkpoint, put every proposed value through the band, and assemble
+    the report. Nothing is written -- not the input, not a staged copy -- so the
+    thresholds an operator is serving cannot move before the report of what
+    would move them exists.
+
+    Args:
+        model_path: The keeper being rebaked. Its serving block is both what
+            the band measures against and what the age is anchored on.
+        calibration: The all-healthy capture to bake from.
+        profile: Feature profile; defaults to the checkpoint's stored one.
+        quantile: Healthy-window quantile for the thresholds.
+        margin: Per-resource margin on each resource's own healthy quantile.
+        calibration_days: Days of healthy data behind this bake, recorded on
+            the report and on the block for the next run to read.
+        seed_path: The ``--seed`` file, for values the serving block has
+            nothing usable for (requirement 1).
+        allow_drift: Keep values the band rejected, restamped.
+        dry_run: Whether this run stops short of a live swap. A report field
+            rather than a property of the exit code (requirement 5).
+
+    Returns:
+        ``(report, block)``: ``build_rebake_report``'s document plus the
+        run-level keys -- what was baked, from what, which resources it left
+        out, how many values it refused -- and the serving block that would go
+        into force, which is the baked block carrying the GUARDED values, the
+        margin, the calibration age, and the stamp the next run's age anchor
+        reads. Of the run-level keys, ``omitted`` lists the resources no
+        proposal reached (the ``kept-*`` rows), ``global_kept`` says
+        whether the previous global is what stays in force, and when it is,
+        the block keeps that global's own ``quantile``, ``healthy_fpr``, and
+        ``n_calibration_windows`` rather than the discarded fit's.
+
+    Raises:
+        SpecError: If a value the band needs is neither usable in the serving
+            block nor usably supplied by the seed.
+        ValueError: If the capture produces no windows to bake from.
+    """
+    serving = _serving_block(model_path)
+    weeks = weeks_since_rebake(serving, model_path)
+    block, eligibility, warnings = _bake(
+        model_path, calibration, profile=profile, quantile=quantile, margin=margin
+    )
+    kept_global, kept, verdicts = guard_rebake(
+        serving,
+        block["threshold"],
+        block.get("per_resource") or {},
+        weeks,
+        eligibility=eligibility,
+        seed_path=seed_path,
+        allow_drift=allow_drift,
+    )
+    # The stamp form provenance writes and _parse_stamp reads, so the block
+    # stamped here is one the next run can age.
+    generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    global_kept = kept_global != block["threshold"]
+    report = build_rebake_report(kept_global, kept, verdicts, weeks, dry_run=dry_run)
+    report.update(
+        generated_at=generated_at,
+        calibration=str(calibration),
+        calibration_days=_json_number(calibration_days),
+        margin=_json_number(margin),
+        quantile=_json_number(quantile),
+        allow_drift=bool(allow_drift),
+        omitted=[v.resource_id for v in verdicts if v.resource_id and v.proposed is None],
+        global_kept=global_kept,
+        bake_warnings=warnings,
+        rejected_count=sum(v.verdict in _REJECTIONS for v in verdicts),
+    )
+    # A kept global describes the fit that produced it; the bake's quantile,
+    # fpr, and window count belong to the fit whose threshold was refused.
+    provenance = (
+        {key: serving[key] for key in _GLOBAL_PROVENANCE if key in serving} if global_kept else {}
+    )
+    return report, {
+        **block,
+        **provenance,
+        "threshold": kept_global,
+        "per_resource": kept,
+        "margin_multiplier": margin,
+        "calibration_days": calibration_days,
+        "rebaked_at": generated_at,
     }
