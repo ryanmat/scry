@@ -70,6 +70,13 @@ in a form no strict reader accepts and the report is the only record that the
 rejection happened. And every row names the threshold that stays in force, so
 a gate-omitted resource reads as keeping its own threshold rather than as
 falling back to the global one.
+
+``stage_checkpoint`` writes the only file a rebake writes, and it is not the
+one in force: a copy of the base checkpoint beside it, carrying the guarded
+serving block, so the thresholds an operator is serving cannot move until a
+swap promotes the copy. The input is pinned by its bytes and by its mtime --
+the age anchor's fallback -- and the staged block is pinned as a replacement of
+the previous one rather than a merge over it.
 """
 
 from __future__ import annotations
@@ -84,6 +91,7 @@ from dataclasses import fields
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import bake_serving_threshold as bake_mod
 import numpy as np
@@ -98,6 +106,7 @@ from scry.eval.calibration import (
     guard_value,
     resolve_old_thresholds,
     run_calibration,
+    stage_checkpoint,
     weeks_since_rebake,
 )
 from scry.eval.hygiene import ResourceEligibility, per_resource_eligibility
@@ -257,9 +266,54 @@ def _base_checkpoint(
     return str(path)
 
 
-def _digest(path: str) -> str:
+def _digest(path: str | Path) -> str:
     """The file's bytes as one hash: what "the input is untouched" is measured by."""
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _checkpoint(path: str | Path) -> dict[str, Any]:
+    """A saved checkpoint as it comes back: weights, config, schema, serving block."""
+    import torch  # local: the test module, like calibration.py, stays torch-free to import
+
+    return torch.load(path, map_location="cpu", weights_only=False)
+
+
+def _same(left: object, right: object) -> bool:
+    """Deep equality over a checkpoint's mixed contents: tensors, arrays, plain data.
+
+    A checkpoint holds model weights beside plain dicts, and neither ``==`` nor
+    ``torch.equal`` alone compares the whole of it: ``==`` on two tensors is a
+    tensor of elementwise comparisons, which is not a truth value.
+    """
+    import torch  # local: the test module, like calibration.py, stays torch-free to import
+
+    arrays = (torch.Tensor, np.ndarray)
+    if isinstance(left, dict) and isinstance(right, dict):
+        return set(left) == set(right) and all(_same(left[key], right[key]) for key in left)
+    if isinstance(left, arrays) or isinstance(right, arrays):
+        return np.array_equal(np.asarray(left), np.asarray(right))
+    return bool(left == right)
+
+
+STAGED_BLOCK = {
+    "threshold": 0.31,
+    "quantile": 0.99,
+    "healthy_fpr": 0.01,
+    "n_calibration_windows": 58,
+    "recon_metric": "numerical_mse_from_mu",
+    "per_resource": {"node-a": 0.24},
+    "margin_multiplier": 2.0,
+    "calibration_days": 7.0,
+    "rebaked_at": "2026-10-05T12:00:00Z",
+}
+"""A guarded block as ``run_calibration`` returns one, for the staging tests.
+
+The bake's own fields plus the four the rebake patches on (``per_resource``,
+``margin_multiplier``, ``calibration_days``, ``rebaked_at``). Every value of it
+differs from the base checkpoint's serving block (``BASE_GLOBAL`` and
+``BASE_PROVENANCE``), so a staged file carrying the base's block, or merging it
+over this one, differs key by key rather than coincidentally matching.
+"""
 
 
 # One case per unusable kind: the current serving block, and the key it leaves
@@ -1166,6 +1220,53 @@ class TestReportAssembly:
         assert report["staged_path"] is None  # nothing staged, and the report says so
 
 
+class TestStaging:
+    def test_staging_writes_beside_the_input_and_never_touches_it(
+        self, keeper_path: str, tmp_path: Path
+    ) -> None:
+        # The rebake's one write, and it is not the file in force: the staged
+        # copy goes beside the live checkpoint, which keeps serving the
+        # thresholds the report was measured against until the swap chain
+        # (requirement 6, --apply) promotes the copy. The input is checked by
+        # its bytes AND its mtime: a rewrite in place would both move the live
+        # thresholds and, since the mtime is the age anchor's fallback, leave
+        # the checkpoint looking freshly baked to the next run's band.
+        model = _base_checkpoint(keeper_path, tmp_path, {"node-a": 0.20})
+        digest, mtime = _digest(model), os.stat(model).st_mtime
+
+        staged = stage_checkpoint(model, STAGED_BLOCK)
+
+        assert _digest(model) == digest  # the live checkpoint is byte-identical
+        assert os.stat(model).st_mtime == mtime  # and not even restated
+        assert staged == Path(model).with_name("serving.staged.pt")
+        assert staged.parent == Path(model).parent  # beside the input, not off in a temp dir
+        assert staged.is_file()
+
+    def test_the_staged_block_is_the_guarded_one_and_the_rest_carries_through(
+        self, keeper_path: str, tmp_path: Path
+    ) -> None:
+        # A rebake moves thresholds and nothing else about the model, so the
+        # staged checkpoint is the base one with its serving block replaced:
+        # the weights, the config, the stored normalization, and the feature
+        # schema are carried through, and the block that was in force --
+        # BASE_PROVENANCE's fit, the previous per-resource map, the previous
+        # stamp -- is gone rather than merged under the new one, which would
+        # leave a refused value in force behind the staged one.
+        model = _base_checkpoint(keeper_path, tmp_path, {"node-a": 0.20})
+        base = _checkpoint(model)
+
+        staged = _checkpoint(stage_checkpoint(model, STAGED_BLOCK))
+
+        assert set(staged) == set(base)
+        assert {"model_state_dict", "feature_schema"} <= set(base)  # the carry-through is real
+        assert {key for key in base if not _same(staged[key], base[key])} == {"serving"}
+        assert staged["serving"] == STAGED_BLOCK
+        assert staged["serving"]["per_resource"] == {"node-a": 0.24}
+        assert staged["serving"]["margin_multiplier"] == 2.0
+        assert staged["serving"]["calibration_days"] == 7.0
+        assert staged["serving"]["quantile"] == 0.99 != BASE_PROVENANCE["quantile"]
+
+
 class TestCalibrationRun:
     def test_the_run_bakes_guards_and_reports_without_writing_anything(
         self, keeper_path: str, tmp_path: Path
@@ -1216,6 +1317,38 @@ class TestCalibrationRun:
 
         assert _digest(model) == digest  # the base checkpoint is untouched
         assert sorted(path.name for path in tmp_path.iterdir()) == listing  # and nothing is staged
+        assert json.loads(json.dumps(report, allow_nan=False)) == report
+
+    def test_the_run_stages_the_block_it_would_serve_and_the_report_names_it(
+        self, keeper_path: str, tmp_path: Path
+    ) -> None:
+        # The same composed run as above, asked to stage. What it wrote is the
+        # block it returned -- the GUARDED one, not the bake's proposals -- and
+        # the report names the file, which is how the CLI and the swap chain
+        # find out what a later --apply would promote. The input stays
+        # byte-identical: staging is a copy beside it, never a write over it.
+        model = _base_checkpoint(keeper_path, tmp_path, {"node-b": 0.21, "node-c": 0.22})
+        healthy = gated_fleet_csv(tmp_path)
+        seed = _write_seed(tmp_path, "json", per_resource={"node-a": 0.20})
+        digest = _digest(model)
+
+        report, block = run_calibration(
+            model, healthy, profile=PROFILE, seed_path=seed, calibration_days=7.0, stage=True
+        )
+
+        staged = Path(model).with_name("serving.staged.pt")
+        assert report["staged_path"] == str(staged)
+        assert staged.is_file()
+        serving = _checkpoint(staged)["serving"]
+        assert serving == block  # the guarded block, as the run returned it
+        assert serving["threshold"] == report["global"]["kept"]
+        # ISO UTC, so the next rebake ages the staged block from its stamp
+        # rather than from the file: freshly staged, it is at the one-day floor.
+        assert serving["rebaked_at"].endswith("Z")
+        assert weeks_since_rebake(serving, staged) == pytest.approx(
+            ONE_DAY_IN_WEEKS, abs=AGE_TOLERANCE_WEEKS
+        )
+        assert _digest(model) == digest  # the checkpoint in force is untouched
         assert json.loads(json.dumps(report, allow_nan=False)) == report
 
     def test_the_report_carries_the_run_level_keys_by_name(
