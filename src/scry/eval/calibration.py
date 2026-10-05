@@ -71,6 +71,13 @@ otherwise write as a bare ``NaN`` that no strict reader accepts, is recorded as
 ``"nan"``, ``"inf"``, or ``"-inf"``, so the one artifact that records a
 non-finite rejection can always be written.
 
+``stage_checkpoint`` writes the one file a rebake writes, and it is not the one
+in force: a copy of the base checkpoint beside it, carrying the guarded block
+while the live checkpoint goes on serving the thresholds that block was
+measured against. Promoting the copy is the swap's business, behind
+``--apply``, so a report always exists before anything an operator serves has
+moved.
+
 ``run_calibration`` is the run itself, composed from all of the above, and the
 module's I/O: it loads the checkpoint, fetches the capture, runs the bake's own
 arithmetic against the base model, reads the clock once for ``generated_at``,
@@ -153,6 +160,9 @@ AGE_FLOOR = timedelta(days=1)
 
 _ONE_WEEK = timedelta(days=7)
 """The unit ``weeks`` is measured in; the band's exponent is in weeks."""
+
+STAGED_INFIX = ".staged"
+"""What a staged checkpoint's name carries before the input's suffix: ``keeper.staged.pt``."""
 
 
 @dataclass(frozen=True)
@@ -848,6 +858,44 @@ def _serving_block(model_path: str | Path) -> dict[str, Any]:
     return dict(checkpoint.get("serving") or {})
 
 
+def stage_checkpoint(model_path: str | Path, block: Mapping[str, Any]) -> Path:
+    """Write the checkpoint a swap would promote, beside the one in force.
+
+    The only file a rebake writes, and deliberately not the file an operator is
+    serving: the staged copy carries the guarded serving block while the live
+    checkpoint goes on serving the thresholds the report was measured against,
+    until the swap chain promotes the copy (requirement 6, behind ``--apply``).
+    Everything else in the checkpoint -- the weights, the config, the stored
+    normalization, the feature schema -- is the base model's, carried through,
+    because a rebake moves thresholds and nothing else about the model.
+
+    Args:
+        model_path: The checkpoint in force. Read and never written -- not
+            even rewritten with bytes of its own, since its mtime is what the
+            next run's age anchor falls back to.
+        block: The serving block to stage, as ``run_calibration`` returns one:
+            the guarded thresholds carrying ``per_resource``,
+            ``margin_multiplier``, ``calibration_days``, and ``rebaked_at``. It
+            replaces the block the base checkpoint carries rather than merging
+            into it, so no value of the superseded block stays in force behind
+            the staged one.
+
+    Returns:
+        Where it wrote: the input's name with ``.staged`` before its suffix, in
+        the input's own directory (``keeper.pt`` -> ``keeper.staged.pt``), so
+        the pair sits together and the suffix a checkpoint is loaded by stays
+        last.
+    """
+    import torch  # local: this module stays importable without torch
+
+    path = Path(model_path)
+    staged = path.with_name(f"{path.stem}{STAGED_INFIX}{path.suffix}")
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    checkpoint["serving"] = dict(block)
+    torch.save(checkpoint, staged)
+    return staged
+
+
 def run_calibration(
     model_path: str | Path,
     calibration: str,
@@ -859,6 +907,7 @@ def run_calibration(
     seed_path: str | Path | None = None,
     allow_drift: bool = False,
     dry_run: bool = True,
+    stage: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Bake, guard, and report a recalibration, in memory.
 
@@ -882,6 +931,11 @@ def run_calibration(
         allow_drift: Keep values the band rejected, restamped.
         dry_run: Whether this run stops short of a live swap. A report field
             rather than a property of the exit code (requirement 5).
+        stage: Whether to write the staged checkpoint beside ``model_path``.
+            Off by default, which leaves the run a pure read; the CLI's
+            stage-and-report path turns it on, and a swap is still a separate
+            step after that (requirement 6). Not keyed off ``dry_run``: a run
+            that will go on to swap stages the same file first.
 
     Returns:
         ``(report, block)``: ``build_rebake_report``'s document plus the
@@ -889,7 +943,9 @@ def run_calibration(
         out, how many values it refused -- and the serving block that would go
         into force, which is the baked block carrying the GUARDED values, the
         margin, the calibration age, and the stamp the next run's age anchor
-        reads. Of the run-level keys, ``omitted`` lists the resources no
+        reads. With ``stage`` on, that block is also what was written beside
+        the checkpoint, at the path the report's ``staged_path`` names.
+        Of the run-level keys, ``omitted`` lists the resources no
         proposal reached (the ``kept-*`` rows), ``global_kept`` says
         whether the previous global is what stays in force, and when it is,
         the block keeps that global's own ``quantile``, ``healthy_fpr``, and
@@ -918,7 +974,24 @@ def run_calibration(
     # stamped here is one the next run can age.
     generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     global_kept = kept_global != block["threshold"]
-    report = build_rebake_report(kept_global, kept, verdicts, weeks, dry_run=dry_run)
+    # A kept global describes the fit that produced it; the bake's quantile,
+    # fpr, and window count belong to the fit whose threshold was refused.
+    provenance = (
+        {key: serving[key] for key in _GLOBAL_PROVENANCE if key in serving} if global_kept else {}
+    )
+    staged_block = {
+        **block,
+        **provenance,
+        "threshold": kept_global,
+        "per_resource": kept,
+        "margin_multiplier": margin,
+        "calibration_days": calibration_days,
+        "rebaked_at": generated_at,
+    }
+    staged = stage_checkpoint(model_path, staged_block) if stage else None
+    report = build_rebake_report(
+        kept_global, kept, verdicts, weeks, dry_run=dry_run, staged_path=staged
+    )
     report.update(
         generated_at=generated_at,
         calibration=str(calibration),
@@ -931,17 +1004,4 @@ def run_calibration(
         bake_warnings=warnings,
         rejected_count=sum(v.verdict in _REJECTIONS for v in verdicts),
     )
-    # A kept global describes the fit that produced it; the bake's quantile,
-    # fpr, and window count belong to the fit whose threshold was refused.
-    provenance = (
-        {key: serving[key] for key in _GLOBAL_PROVENANCE if key in serving} if global_kept else {}
-    )
-    return report, {
-        **block,
-        **provenance,
-        "threshold": kept_global,
-        "per_resource": kept,
-        "margin_multiplier": margin,
-        "calibration_days": calibration_days,
-        "rebaked_at": generated_at,
-    }
+    return report, staged_block
