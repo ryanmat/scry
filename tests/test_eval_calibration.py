@@ -77,6 +77,17 @@ serving block, so the thresholds an operator is serving cannot move until a
 swap promotes the copy. The input is pinned by its bytes and by its mtime --
 the age anchor's fallback -- and the staged block is pinned as a replacement of
 the previous one rather than a merge over it.
+
+``swap_checkpoint`` is what promotes that copy, and the one piece of the rebake
+that moves the file in force. It is a function over the live path, the staged
+path, the restart command, and the health check, which is what makes a failing
+health check an outcome its caller reads rather than a process exit. It is
+pinned on what it promotes (the live path ends up holding the staged bytes, the
+staged file is gone, and no backup is left behind a health check that passed),
+on what it keeps when the health check fails (the backup, bytes and mtime, for
+the restore to come), and on what it does with nothing to promote: raise before
+the live checkpoint has been backed up, replaced, or restarted around, since a
+half-swap is the failure the chain is ordered the way it is to prevent.
 """
 
 from __future__ import annotations
@@ -96,6 +107,7 @@ from typing import Any
 import bake_serving_threshold as bake_mod
 import numpy as np
 import pytest
+from rebake_serving import swap_checkpoint
 from synth import PROFILE, gated_fleet_csv
 
 from scry.eval.calibration import (
@@ -314,6 +326,25 @@ differs from the base checkpoint's serving block (``BASE_GLOBAL`` and
 ``BASE_PROVENANCE``), so a staged file carrying the base's block, or merging it
 over this one, differs key by key rather than coincidentally matching.
 """
+
+
+SUCCEEDS = ["/bin/true"]
+"""A restart or health-check command that exits 0: the real invocation's stand-in."""
+
+FAILS = ["/bin/false"]
+"""A command that exits non-zero; the override exists so this path is testable at all."""
+
+
+def _copy_command(source: str | Path, destination: str | Path) -> list[str]:
+    """A command whose whole effect is to copy ``source`` to ``destination``.
+
+    The chain's commands are opaque to it, so what a test knows about whether
+    one ran is what it left on disk. One command form serves both directions of
+    that: the copy it leaves in the swapped case is what proves the form runs
+    at all, so the case that asserts no copy exists is asserting about a
+    command that demonstrably would have left one.
+    """
+    return ["/bin/sh", "-c", 'cp "$1" "$2"', "sh", str(source), str(destination)]
 
 
 # One case per unusable kind: the current serving block, and the key it leaves
@@ -1528,6 +1559,95 @@ class TestCalibrationRun:
         assert {key: block[key] for key in BASE_PROVENANCE} == expected
         assert block["threshold"] == report["global"]["kept"]
         assert json.loads(json.dumps(report, allow_nan=False)) == report
+
+
+class TestSwapChain:
+    def test_the_chain_promotes_the_staged_bytes_and_clears_the_backup(
+        self, keeper_path: str, tmp_path: Path
+    ) -> None:
+        # The swap an --apply runs, end to end over real checkpoints: the live
+        # path ends up holding the staged bytes, the staged file is gone --
+        # promoted rather than copied, so a later --apply cannot promote the
+        # same stale file a second time -- and the backup the chain took is
+        # cleaned up once the health check passes, which the directory listing
+        # pins whatever the backup was named. The restart's command copies
+        # whatever is in force at the moment it runs, so the copy it leaves is
+        # evidence of the order: back up, promote, restart, verify, with the
+        # service restarted onto the checkpoint it is being restarted for.
+        live = _base_checkpoint(keeper_path, tmp_path, {"node-a": 0.20})
+        staged = stage_checkpoint(live, STAGED_BLOCK)
+        staged_digest = _digest(staged)
+        witness = tmp_path / "restarted-with.pt"
+
+        swap = swap_checkpoint(
+            live,
+            staged,
+            restart_command=_copy_command(live, witness),
+            health_check_command=SUCCEEDS,
+        )
+
+        assert swap.outcome == "swapped"
+        assert swap.backup is None  # cleaned up, and the outcome says so
+        assert _digest(live) == staged_digest  # the staged bytes are what serves now
+        assert _checkpoint(live)["serving"] == STAGED_BLOCK
+        assert not staged.exists()  # promoted, not copied
+        assert _digest(witness) == staged_digest  # the restart ran, and ran after the swap
+        assert sorted(path.name for path in tmp_path.iterdir()) == [
+            "restarted-with.pt",
+            "serving.pt",
+        ]
+
+    def test_a_failed_health_check_comes_back_as_an_outcome_and_keeps_the_backup(
+        self, keeper_path: str, tmp_path: Path
+    ) -> None:
+        # The chain is a function and not an argparse body, which is what a
+        # health check that fails demonstrates: it comes back as an outcome
+        # naming what failed, for the caller to map to its exit code, rather
+        # than as a SystemExit no test could inspect. The backup is left where
+        # it is, holding the bytes that were in force and their mtime -- the
+        # age anchor's fallback, which a restore that rewrote it would move --
+        # because restoring from it is the next step's half of this chain.
+        live = _base_checkpoint(keeper_path, tmp_path, {"node-a": 0.20})
+        served, mtime = _digest(live), os.stat(live).st_mtime
+        staged = stage_checkpoint(live, STAGED_BLOCK)
+
+        swap = swap_checkpoint(live, staged, restart_command=SUCCEEDS, health_check_command=FAILS)
+
+        assert swap.outcome != "swapped"
+        assert "health check" in swap.reason  # what failed, not merely that something did
+        assert swap.backup is not None
+        assert _digest(swap.backup) == served  # the bytes that were in force, kept
+        assert os.stat(swap.backup).st_mtime == mtime
+
+    def test_nothing_staged_stops_the_chain_before_the_live_checkpoint_moves(
+        self, keeper_path: str, tmp_path: Path
+    ) -> None:
+        # Nothing to promote is a spec error, and it is raised before the chain
+        # touches the file in force: a half-swap -- a live checkpoint backed
+        # up, or replaced, or a service restarted around it -- is the failure
+        # the chain's order exists to prevent, so the one thing it must not do
+        # with a missing staged file is any part of itself. The live file is
+        # pinned by its bytes and its mtime, the directory by holding nothing
+        # new, and the two commands by the copies neither of them left -- the
+        # same command form the swapped case above proves does leave one.
+        live = _base_checkpoint(keeper_path, tmp_path, {"node-a": 0.20})
+        digest, mtime = _digest(live), os.stat(live).st_mtime
+        missing = Path(live).with_name("serving.staged.pt")
+        restarted, checked = tmp_path / "restarted-with.pt", tmp_path / "checked.pt"
+
+        with pytest.raises(SpecError, match=r"serving\.staged\.pt"):
+            swap_checkpoint(
+                live,
+                missing,
+                restart_command=_copy_command(live, restarted),
+                health_check_command=_copy_command(live, checked),
+            )
+
+        assert _digest(live) == digest  # the checkpoint in force is byte-identical
+        assert os.stat(live).st_mtime == mtime  # and not even restated
+        assert not restarted.exists()  # neither command ran
+        assert not checked.exists()
+        assert sorted(path.name for path in tmp_path.iterdir()) == ["serving.pt"]
 
 
 class TestPackageExports:
