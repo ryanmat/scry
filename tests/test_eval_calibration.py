@@ -83,11 +83,19 @@ that moves the file in force. It is a function over the live path, the staged
 path, the restart command, and the health check, which is what makes a failing
 health check an outcome its caller reads rather than a process exit. It is
 pinned on what it promotes (the live path ends up holding the staged bytes, the
-staged file is gone, and no backup is left behind a health check that passed),
-on what it keeps when the health check fails (the backup, bytes and mtime, for
-the restore to come), and on what it does with nothing to promote: raise before
-the live checkpoint has been backed up, replaced, or restarted around, since a
-half-swap is the failure the chain is ordered the way it is to prevent.
+staged file is gone, and no backup is left behind a health check that passed)
+and on what it does with nothing to promote: raise before the live checkpoint
+has been backed up, replaced, or restarted around, since a half-swap is the
+failure the chain is ordered the way it is to prevent.
+
+Either link of that chain refusing rolls the swap back, and the rollback is
+pinned on all three files it leaves: the live path holding the bytes and the
+mtime it held before the swap -- the age anchor's fallback, which a restore
+that rewrote it would move -- the staged copy back where it was for a later
+``--apply``, and no backup left over, since the restore is what consumes it. A
+command that cannot be executed at all is pinned as the same refusal as one
+that exits non-zero, because it fails after the promote and an exception out of
+the chain there would leave the staged checkpoint in force with no outcome.
 """
 
 from __future__ import annotations
@@ -1587,7 +1595,6 @@ class TestSwapChain:
         )
 
         assert swap.outcome == "swapped"
-        assert swap.backup is None  # cleaned up, and the outcome says so
         assert _digest(live) == staged_digest  # the staged bytes are what serves now
         assert _checkpoint(live)["serving"] == STAGED_BLOCK
         assert not staged.exists()  # promoted, not copied
@@ -1597,27 +1604,80 @@ class TestSwapChain:
             "serving.pt",
         ]
 
-    def test_a_failed_health_check_comes_back_as_an_outcome_and_keeps_the_backup(
-        self, keeper_path: str, tmp_path: Path
+    @pytest.mark.parametrize(
+        ("restart_command", "health_check_command", "what"),
+        [
+            pytest.param(SUCCEEDS, FAILS, "health check", id="health-check-refuses"),
+            pytest.param(FAILS, SUCCEEDS, "restart", id="restart-refuses"),
+        ],
+    )
+    def test_a_refused_checkpoint_is_rolled_back_and_the_staged_copy_kept(
+        self,
+        keeper_path: str,
+        tmp_path: Path,
+        restart_command: list[str],
+        health_check_command: list[str],
+        what: str,
     ) -> None:
-        # The chain is a function and not an argparse body, which is what a
-        # health check that fails demonstrates: it comes back as an outcome
-        # naming what failed, for the caller to map to its exit code, rather
-        # than as a SystemExit no test could inspect. The backup is left where
-        # it is, holding the bytes that were in force and their mtime -- the
-        # age anchor's fallback, which a restore that rewrote it would move --
-        # because restoring from it is the next step's half of this chain.
+        # Either link refusing undoes the whole swap, and the chain is a
+        # function and not an argparse body, which is what that demonstrates:
+        # what comes back is an outcome naming the command that refused, for
+        # the caller to map to its exit code, rather than a SystemExit no test
+        # could inspect. What is in force afterwards is what was in force
+        # before, down to the mtime the next run's age anchor falls back to,
+        # which a restore that rewrote the file would move and widen the band
+        # with. The staged copy is put back where it was, so the operator can
+        # fix the service and promote the same bake rather than re-run it. And
+        # the directory holds nothing else: the restore consumes the backup,
+        # which is what stops a second --apply from copying a checkpoint this
+        # one refused over the last known good one.
         live = _base_checkpoint(keeper_path, tmp_path, {"node-a": 0.20})
         served, mtime = _digest(live), os.stat(live).st_mtime
         staged = stage_checkpoint(live, STAGED_BLOCK)
+        staged_digest = _digest(staged)
 
-        swap = swap_checkpoint(live, staged, restart_command=SUCCEEDS, health_check_command=FAILS)
+        swap = swap_checkpoint(
+            live,
+            staged,
+            restart_command=restart_command,
+            health_check_command=health_check_command,
+        )
 
-        assert swap.outcome != "swapped"
-        assert "health check" in swap.reason  # what failed, not merely that something did
-        assert swap.backup is not None
-        assert _digest(swap.backup) == served  # the bytes that were in force, kept
-        assert os.stat(swap.backup).st_mtime == mtime
+        assert swap.outcome == "rolled-back"
+        assert swap.reason == f"{what} command {' '.join(FAILS)} exited 1"
+        assert _digest(live) == served  # the bytes that were in force are in force again
+        assert os.stat(live).st_mtime == mtime  # and carry the age anchor's fallback
+        assert _digest(staged) == staged_digest  # the staged copy is back, intact
+        assert sorted(path.name for path in tmp_path.iterdir()) == [
+            "serving.pt",
+            "serving.staged.pt",
+        ]
+
+    def test_a_command_that_cannot_run_rolls_back_like_one_that_refused(
+        self, keeper_path: str, tmp_path: Path
+    ) -> None:
+        # Both commands come from CLI flags, so argv[0] can be a misspelled
+        # unit name or a binary the operator's host does not have, and the exec
+        # fails before there is an exit code to read at all. That happens after
+        # the promote, so an OSError let out of the chain would leave the
+        # staged checkpoint in force with no outcome, no rollback, and a
+        # traceback where the exit code belongs -- the half-swap the chain is
+        # ordered the way it is to prevent. It is a refusal by that link like
+        # any other, and the reason names the command that could not run.
+        live = _base_checkpoint(keeper_path, tmp_path, {"node-a": 0.20})
+        served = _digest(live)
+        staged = stage_checkpoint(live, STAGED_BLOCK)
+        staged_digest = _digest(staged)
+        absent = str(tmp_path / "no-such-restart-command")
+
+        swap = swap_checkpoint(
+            live, staged, restart_command=[absent], health_check_command=SUCCEEDS
+        )
+
+        assert swap.outcome == "rolled-back"
+        assert swap.reason.startswith(f"restart command {absent} could not run: ")
+        assert _digest(live) == served
+        assert _digest(staged) == staged_digest
 
     def test_nothing_staged_stops_the_chain_before_the_live_checkpoint_moves(
         self, keeper_path: str, tmp_path: Path

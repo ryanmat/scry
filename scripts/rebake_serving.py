@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Description: The serving-checkpoint swap: back up, promote the staged copy, restart, verify.
+# Description: The serving-checkpoint swap: back up, promote, restart, verify, roll back.
 # Description: A function the CLI's --apply calls; guard, bake, and report stay in calibration.py.
 
 """Promote a staged serving checkpoint and verify what it put in force.
@@ -22,6 +22,14 @@ only once the checkpoint it will load is the one in place; and the health check
 is asked only once the restart has been. With nothing staged to promote, none
 of it happens: that is a spec error raised before the live checkpoint is
 touched, because a half-swap is worse than a swap that never started.
+
+Recoverable is not enough on its own, so either link refusing rolls the swap
+back from that backup before the outcome is returned: what an operator is left
+with is the checkpoint that was in force, the staged copy they can promote
+again once the service is fixed, and nothing else. A command that cannot be
+executed at all counts as that link refusing, because it refuses after the
+promote and an exception out of the chain there would leave the staged
+checkpoint in force with no outcome to act on.
 
 Guard, bake, and report logic stays in ``scry.eval.calibration``, pure and
 tested there. This module is the one that moves files and runs commands.
@@ -47,27 +55,64 @@ BACKUP_INFIX = ".backup"
 OUTCOME_SWAPPED = "swapped"
 """The staged checkpoint is in force and the restarted service answered its health check."""
 
-OUTCOME_UNVERIFIED = "unverified"
-"""The staged checkpoint is in force but the restart or the health check refused it.
+OUTCOME_ROLLED_BACK = "rolled-back"
+"""The restart or the health check refused the staged checkpoint, and the swap was undone.
 
-The backup is still on disk, and restoring from it is the rollback half of this
-chain, which is where the ``rolled-back`` outcome and its exit 3 come from.
-Nothing in the repo calls this chain until that half lands.
+The live path holds the bytes and the mtime it held before, the staged copy is
+back beside it to be promoted again once the service is fixed, and no backup is
+left over: the restore is what consumes it. This is the outcome the CLI maps to
+exit 3 (spec section 10, requirement 5).
 """
 
 
 @dataclass(frozen=True)
 class SwapOutcome:
-    """What a swap did, what decided it, and what is left to undo it with."""
+    """What a swap did and what decided it."""
 
     outcome: str
-    """``swapped`` or ``unverified``: whether what is in force is verified to serve."""
+    """``swapped`` or ``rolled-back``: whether the staged checkpoint is in force."""
 
     reason: str
-    """The command that decided it, and what it exited with."""
+    """The command that decided it, and what it exited with or why it could not run."""
 
-    backup: Path | None
-    """Where the previous checkpoint is kept, or ``None`` once the swap cleaned it up."""
+
+def _refusal(what: str, command: Sequence[str]) -> str | None:
+    """Run one link of the chain and say why it refused, or ``None`` if it passed.
+
+    A command that cannot be executed at all -- ``argv[0]`` misspelled, absent
+    from the operator's host, not executable -- is a refusal by this link and
+    not an exception out of the chain. Both commands arrive from CLI flags, so
+    that is an ordinary operator typo rather than a programming error, and it
+    happens after the promote: letting the ``OSError`` escape would leave the
+    staged checkpoint in force with no outcome and nothing rolled back.
+    """
+    try:
+        code = subprocess.run(list(command), check=False).returncode
+    except OSError as exc:
+        return f"{what} command {shlex.join(command)} could not run: {exc}"
+    return None if code == 0 else f"{what} command {shlex.join(command)} exited {code}"
+
+
+def _roll_back(live: Path, staged: Path, backup: Path) -> None:
+    """Undo a promote: the previous checkpoint back in force, the staged copy back beside it.
+
+    The staged bytes are copied back to the staged path first and the backup is
+    renamed over the live one second, which is the swap's own pair of
+    operations run backwards and for the same reasons: the copy leaves the live
+    path readable while it runs, and the rename is atomic, so a process reading
+    the live path sees the staged checkpoint or the restored one and never a
+    half-written file. The rename preserves the mtime ``copy2`` kept on the
+    backup, which is the fallback the next run's age anchor needs. It is also
+    what consumes the backup, so a second ``--apply`` after a rolled-back one
+    cannot copy a refused checkpoint over the last known good one. Should
+    either operation fail -- a full disk on the copy -- the ``OSError`` escapes
+    with the state the restore started from still on disk, the staged
+    checkpoint in force and the backup beside it: recoverable by hand, which is
+    what the swap's ordering bought and what no reordering of these two could
+    improve on.
+    """
+    shutil.copy2(live, staged)
+    backup.replace(live)
 
 
 def swap_checkpoint(
@@ -91,10 +136,12 @@ def swap_checkpoint(
             against a command that fails; the operator's default is the CLI's.
 
     Returns:
-        ``SwapOutcome``: ``swapped`` with the backup cleaned up when the
-        restart and the health check both succeeded, ``unverified`` with the
-        backup kept when either refused. A refusal is a value, not an
-        exception and not an exit: which exit code it earns is the CLI's.
+        ``SwapOutcome``: ``swapped`` when the restart and the health check both
+        succeeded, ``rolled-back`` -- the previous checkpoint restored and the
+        staged copy left where it was -- when either refused, by a non-zero
+        exit or by not running at all. Either way the backup is gone. A refusal
+        is a value, not an exception and not an exit: which exit code it earns
+        is the CLI's.
 
     Raises:
         SpecError: If there is nothing staged at ``staged_path``. Raised before
@@ -110,16 +157,12 @@ def swap_checkpoint(
     shutil.copy2(live, backup)
     staged.replace(live)
     for what, command in (("restart", restart_command), ("health check", health_check_command)):
-        code = subprocess.run(list(command), check=False).returncode
-        if code != 0:
-            return SwapOutcome(
-                outcome=OUTCOME_UNVERIFIED,
-                reason=f"{what} command {shlex.join(command)} exited {code}",
-                backup=backup,
-            )
+        refusal = _refusal(what, command)
+        if refusal is not None:
+            _roll_back(live, staged, backup)
+            return SwapOutcome(outcome=OUTCOME_ROLLED_BACK, reason=refusal)
     backup.unlink()
     return SwapOutcome(
         outcome=OUTCOME_SWAPPED,
         reason=f"health check {shlex.join(health_check_command)} passed",
-        backup=None,
     )
