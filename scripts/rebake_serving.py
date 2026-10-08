@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
 # Description: The serving-checkpoint swap: back up, promote, restart, verify, roll back.
-# Description: A function the CLI's --apply calls; guard, bake, and report stay in calibration.py.
+# Description: And the rebake CLI over it: bake, guard, stage beside the live checkpoint, report.
 
-"""Promote a staged serving checkpoint and verify what it put in force.
+"""Rebake a serving checkpoint's thresholds, and promote the result on request.
+
+The default run is stage-and-report and nothing else (spec section 10,
+requirement 6). ``run_calibration`` bakes against the checkpoint in force, puts
+every proposed threshold through the per-week band, and writes the guarded
+block to a staged copy beside the live one; this script holds the operator's
+inputs and writes the report of what was decided. The thresholds being served
+do not move, because promoting that staged copy is the swap below -- a separate
+run, behind ``--apply`` -- so there is a report of a change before there is a
+change.
 
 ``swap_checkpoint`` is the chain ``--apply`` runs, and it is a function rather
 than a stretch of an argparse body so that it can be driven by a test: the live
@@ -32,11 +41,18 @@ promote and an exception out of the chain there would leave the staged
 checkpoint in force with no outcome to act on.
 
 Guard, bake, and report logic stays in ``scry.eval.calibration``, pure and
-tested there. This module is the one that moves files and runs commands.
+tested there. This module is the one that holds the operator's inputs, moves
+files, and runs commands.
+
+Example:
+    python scripts/rebake_serving.py --model models/serving.pt \\
+        --calibration captures/healthy_week.csv --report rebake.json
 """
 
 from __future__ import annotations
 
+import argparse
+import json
 import shlex
 import shutil
 import subprocess
@@ -44,6 +60,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from scry.eval.calibration import run_calibration
 from scry.eval.rubric import SpecError
 
 if TYPE_CHECKING:
@@ -166,3 +183,54 @@ def swap_checkpoint(
         outcome=OUTCOME_SWAPPED,
         reason=f"health check {shlex.join(health_check_command)} passed",
     )
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse the rebake's inputs: what to rebake, from what, and where to report it."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Rebake a serving checkpoint's thresholds, stage the guarded result beside "
+            "it, and write the report. The checkpoint in force is not touched."
+        ),
+    )
+    parser.add_argument(
+        "--model",
+        required=True,
+        help="Checkpoint in force: what is rebaked, and what the band measures against.",
+    )
+    parser.add_argument(
+        "--calibration",
+        required=True,
+        help="All-healthy capture (URI or path) to bake the fresh thresholds from.",
+    )
+    parser.add_argument(
+        "--report",
+        required=True,
+        help="Where to write the report JSON: every verdict, and the thresholds kept.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Stage a guarded rebake beside the checkpoint in force and report what it decided.
+
+    The staged copy is written but never promoted: what an operator is left
+    with is a report to read and a file a later ``--apply`` can put in force,
+    which is the separation spec section 10, requirement 6 asks for.
+
+    Returns:
+        ``0``: the run completed (requirement 5, row 0). The report names the
+        staged checkpoint, so the swap has something to be pointed at.
+    """
+    args = parse_args(argv)
+    report, _ = run_calibration(args.model, args.calibration, stage=True)
+    Path(args.report).write_text(json.dumps(report, indent=2) + "\n")
+    print(
+        f"rebaked {args.model} against {args.calibration}: "
+        f"staged {report['staged_path']}, reported to {args.report}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
