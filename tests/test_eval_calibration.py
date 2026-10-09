@@ -96,6 +96,17 @@ that rewrote it would move -- the staged copy back where it was for a later
 command that cannot be executed at all is pinned as the same refusal as one
 that exits non-zero, because it fails after the promote and an exception out of
 the chain there would leave the staged checkpoint in force with no outcome.
+
+``scripts/rebake_serving.py`` is all of that as an operator runs it, and its
+clean path is pinned through a real subprocess against a real bake, which is
+the only way the exit code is a measurement rather than a return value a test
+asserted about itself. Nothing is refused, so the run is exit-code row 0 of
+requirement 5 -- completed, no rejections -- and what it leaves behind is the
+report an operator reads. The default is stage-and-report and nothing else
+(requirement 6): the staged checkpoint appears beside the live one, which is
+pinned by its bytes and its mtime to be the file it was before the run, still
+serving the thresholds the report was measured against until an ``--apply``
+promotes the copy.
 """
 
 from __future__ import annotations
@@ -105,6 +116,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import sys
 from dataclasses import fields
 from datetime import datetime, timedelta, timezone
@@ -353,6 +365,20 @@ def _copy_command(source: str | Path, destination: str | Path) -> list[str]:
     command that demonstrably would have left one.
     """
     return ["/bin/sh", "-c", 'cp "$1" "$2"', "sh", str(source), str(destination)]
+
+
+REPO = Path(__file__).resolve().parents[1]
+REBAKE_SCRIPT = REPO / "scripts" / "rebake_serving.py"
+
+CLEAN_PER_RESOURCE = {"node-a": 0.20, "node-b": 0.21, "node-c": 0.22}
+"""A serving map the gated fleet's bake has nothing to refuse against.
+
+Every resource of the capture has a usable previous value, so the run needs no
+seed, and the block the CLI run reads is STALE_WEEKS old, so the band (grow
+``1.5 ** 26``) accepts whatever the tiny keeper proposes for the one resource
+the hygiene gates leave it to propose for. Nothing rejected is what makes the
+run exit-code row 0 rather than row 1.
+"""
 
 
 # One case per unusable kind: the current serving block, and the key it leaves
@@ -1708,6 +1734,113 @@ class TestSwapChain:
         assert not restarted.exists()  # neither command ran
         assert not checked.exists()
         assert sorted(path.name for path in tmp_path.iterdir()) == ["serving.pt"]
+
+
+@pytest.fixture(scope="module")
+def rebake_run(keeper_path: str, tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
+    """One run of the CLI as an operator runs it, over a bake with nothing to refuse.
+
+    A real subprocess over a real keeper and a real capture, which is what
+    makes the exit code a measurement: in-process the run returns a report and
+    the exit code is whatever a test decides to assert about. Module-scoped
+    because that run is a whole bake, and both cases below read the one
+    invocation.
+
+    What the live checkpoint was -- its bytes, and the mtime the next run's
+    age anchor falls back to -- is snapshotted ahead of the subprocess, which
+    is the only point at which it is the before of a before/after comparison:
+    read afterwards it would equal itself however the run had rewritten it.
+    """
+    tmp = tmp_path_factory.mktemp("rebake_cli")
+    model = _base_checkpoint(keeper_path, tmp, CLEAN_PER_RESOURCE)
+    calibration = gated_fleet_csv(tmp)
+    report = tmp / "rebake.json"
+    before = {"served": _digest(model), "mtime": os.stat(model).st_mtime}
+    proc = subprocess.run(
+        [
+            sys.executable, str(REBAKE_SCRIPT),
+            "--model", model,
+            "--calibration", calibration,
+            "--report", str(report),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO,
+    )
+    return {
+        "proc": proc,
+        "model": model,
+        "calibration": calibration,
+        "report": report,
+        **before,
+    }
+
+
+class TestRebakeServingCLI:
+    def test_a_bake_with_nothing_refused_writes_the_report_and_exits_0(
+        self, rebake_run: dict[str, Any]
+    ) -> None:
+        # Exit-code row 0 of requirement 5, through the CLI rather than around
+        # it: completed, no rejections, and the report is what completing
+        # means -- an operator who reads nothing else has to be able to read
+        # every decision out of the file the run names on stdout. The verdicts
+        # are the real capture's, so they pin that both paths reached the run:
+        # node-a is proposed for and accepted, and node-b and node-c are the
+        # hygiene gates' own omissions, which are not refusals and do not move
+        # the exit code off 0.
+        proc = rebake_run["proc"]
+        report_path = rebake_run["report"]
+
+        assert proc.returncode == 0, proc.stderr
+        assert str(report_path) in proc.stdout
+        assert report_path.is_file()
+
+        report = json.loads(report_path.read_text())
+        assert report["calibration"] == rebake_run["calibration"]
+        assert report["rejected_count"] == 0
+        assert report["global"]["verdict"] == "accepted"
+        assert report["global"]["kept"] == report["global"]["proposed"] > 0.0
+        assert {rid: row["verdict"] for rid, row in report["per_resource"].items()} == {
+            "node-a": "accepted",
+            "node-b": "kept-gate-omitted:divergent-coverage:cpuUsageNanoCores",
+            "node-c": "kept-gate-omitted:insufficient-windows:12<50",
+        }
+        assert report["weeks"] == pytest.approx(STALE_WEEKS, abs=AGE_TOLERANCE_WEEKS)
+        assert json.loads(json.dumps(report, allow_nan=False)) == report
+
+    def test_the_default_run_stages_beside_the_checkpoint_and_leaves_it_in_force(
+        self, rebake_run: dict[str, Any]
+    ) -> None:
+        # Requirement 6: without --apply the run is stage-and-report and
+        # nothing else. The checkpoint an operator is serving is pinned by its
+        # bytes AND its mtime -- a run that rewrote it would both move the live
+        # thresholds before anyone read the report of what would move them and,
+        # since the mtime is the age anchor's fallback, leave the next run's
+        # band measuring against a file that looks freshly baked. What the run
+        # does leave is the staged copy beside it, carrying the thresholds the
+        # report says would serve, for a later --apply to promote; the
+        # directory listing pins that there is nothing else, no promoted file
+        # and no backup of one.
+        model = Path(rebake_run["model"])
+        report = json.loads(rebake_run["report"].read_text())
+        staged = model.with_name("serving.staged.pt")
+
+        assert _digest(model) == rebake_run["served"]  # the checkpoint in force is byte-identical
+        assert os.stat(model).st_mtime == rebake_run["mtime"]  # and not even restated
+        serving = _checkpoint(model)["serving"]
+        assert serving["threshold"] == BASE_GLOBAL  # still serving the block the band measured
+        assert serving["per_resource"] == CLEAN_PER_RESOURCE
+
+        assert report["dry_run"] is True  # no swap was attempted, and the report says so
+        assert report["staged_path"] == str(staged)
+        assert staged.is_file()
+        assert _checkpoint(staged)["serving"]["threshold"] == report["global"]["kept"]
+        assert sorted(path.name for path in model.parent.iterdir()) == [
+            "gated_fleet.csv",
+            "rebake.json",
+            "serving.pt",
+            "serving.staged.pt",
+        ]
 
 
 class TestPackageExports:
