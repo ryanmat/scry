@@ -802,6 +802,7 @@ def _bake(
     profile: str | None,
     quantile: float,
     margin: float,
+    device: str | None,
 ) -> tuple[dict[str, Any], Mapping[str, ResourceEligibility] | None, list[str]]:
     """Bake against the BASE model and take the serving block it would write.
 
@@ -813,6 +814,11 @@ def _bake(
     hygiene verdicts behind its ``per_resource`` map (omission provenance,
     requirement 4), and the warning lines it printed, which name the resources
     it could not propose for and are re-emitted on stderr as well as reported.
+
+    A keeper detects its own device; ``device`` is the operator's override of
+    that detection, and the loaded model is moved onto it before the bake
+    scores, because the device the keeper carries is the one the scoring runs
+    on.
     """
     import asyncio
 
@@ -831,6 +837,9 @@ def _bake(
     import bake_serving_threshold
 
     keeper = load_keeper(str(model_path))
+    if device is not None and device != keeper.device:
+        keeper.model.to(device)
+        keeper.device = device
     df_long = asyncio.run(fetch_full_capture(calibration, profile=profile or keeper.profile))
     stderr = io.StringIO()
     try:
@@ -903,6 +912,7 @@ def run_calibration(
     profile: str | None = None,
     quantile: float = DEFAULT_QUANTILE,
     margin: float = DEFAULT_MARGIN,
+    device: str | None = None,
     calibration_days: float | None = None,
     seed_path: str | Path | None = None,
     allow_drift: bool = False,
@@ -924,6 +934,8 @@ def run_calibration(
         profile: Feature profile; defaults to the checkpoint's stored one.
         quantile: Healthy-window quantile for the thresholds.
         margin: Per-resource margin on each resource's own healthy quantile.
+        device: Torch device the bake scores on; defaults to the one the
+            keeper detects (``cuda``, ``mps``, or ``cpu``).
         calibration_days: Days of healthy data behind this bake, recorded on
             the report and on the block for the next run to read.
         seed_path: The ``--seed`` file, for values the serving block has
@@ -959,7 +971,7 @@ def run_calibration(
     serving = _serving_block(model_path)
     weeks = weeks_since_rebake(serving, model_path)
     block, eligibility, warnings = _bake(
-        model_path, calibration, profile=profile, quantile=quantile, margin=margin
+        model_path, calibration, profile=profile, quantile=quantile, margin=margin, device=device
     )
     kept_global, kept, verdicts = guard_rebake(
         serving,
