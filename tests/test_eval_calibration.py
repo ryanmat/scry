@@ -107,6 +107,17 @@ report an operator reads. The default is stage-and-report and nothing else
 pinned by its bytes and its mtime to be the file it was before the run, still
 serving the thresholds the report was measured against until an ``--apply``
 promotes the copy.
+
+The other exit code a stage-and-report run can earn is row 1 -- completed, at
+least one proposal refused -- and it is measured the same way, through a real
+subprocess over a bake the band refuses wholesale. A refusal is not a failure
+of the run: it stages and reports like any other, and what distinguishes it is
+the held thresholds on the report's rows and the 1 the process exits with. The
+run's four operator inputs -- the margin, the quantile, the device the bake
+scores on, and the health check a later ``--apply`` runs -- are pinned as flags
+whose defaults are the constants the code already carries, documented in
+``--help`` where an operator reads them, and pinned to reach the run rather
+than to be parsed and dropped.
 """
 
 from __future__ import annotations
@@ -116,6 +127,7 @@ import json
 import math
 import os
 import re
+import shlex
 import subprocess
 import sys
 from dataclasses import fields
@@ -127,10 +139,13 @@ from typing import Any
 import bake_serving_threshold as bake_mod
 import numpy as np
 import pytest
+import rebake_serving
 from rebake_serving import swap_checkpoint
 from synth import PROFILE, gated_fleet_csv
 
 from scry.eval.calibration import (
+    DEFAULT_MARGIN,
+    DEFAULT_QUANTILE,
     GuardVerdict,
     build_rebake_report,
     check_guards,
@@ -1594,6 +1609,40 @@ class TestCalibrationRun:
         assert block["threshold"] == report["global"]["kept"]
         assert json.loads(json.dumps(report, allow_nan=False)) == report
 
+    def test_the_bake_scores_on_the_device_the_run_was_given(
+        self, keeper_path: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The device is the one run parameter with no trace in the report, so
+        # what it reaches is asserted where it lands: on the keeper the bake
+        # scores with, whose own device is what reconstruction_errors runs on.
+        # ``meta`` is the device for this, because every torch build has it and
+        # it allocates nothing -- on a CPU-only host a run asked for ``cpu``
+        # and a run that ignored its device are indistinguishable.
+        seen: dict[str, object] = {}
+
+        def recording_bake(keeper, df_long, *, quantile, step, per_resource_margin):
+            seen["device"] = keeper.device
+            seen["parameters"] = {p.device.type for p in keeper.model.parameters()}
+            block = {
+                "threshold": BASE_GLOBAL,
+                "quantile": quantile,
+                "healthy_fpr": 0.01,
+                "n_calibration_windows": 60,
+                "recon_metric": "numerical_mse_from_mu",
+                "per_resource": {"node-a": BASE_GLOBAL},
+                "margin_multiplier": per_resource_margin,
+            }
+            return block, {}
+
+        monkeypatch.setattr(bake_mod, "compute_serving_block", recording_bake)
+        model = _base_checkpoint(keeper_path, tmp_path, {"node-a": BASE_GLOBAL}, age=timedelta(0))
+        healthy = gated_fleet_csv(tmp_path)
+
+        run_calibration(model, healthy, profile=PROFILE, device="meta")
+
+        assert seen["device"] == "meta"
+        assert seen["parameters"] == {"meta"}  # the weights moved, not just the label
+
 
 class TestSwapChain:
     def test_the_chain_promotes_the_staged_bytes_and_clears_the_backup(
@@ -1776,6 +1825,43 @@ def rebake_run(keeper_path: str, tmp_path_factory: pytest.TempPathFactory) -> di
     }
 
 
+@pytest.fixture(scope="module")
+def refused_rebake_run(
+    keeper_path: str, tmp_path_factory: pytest.TempPathFactory
+) -> dict[str, Any]:
+    """The same CLI run over a bake the band refuses: exit-code row 1, measured.
+
+    The serving block is stamped at the moment of the run, so its age floors at
+    one day and the band is about six percent either way, and every threshold
+    it serves is ``TINY_THRESHOLD``, orders of magnitude under anything a real
+    bake of the gated fleet proposes: the global and node-a are both refused
+    whatever the capture scores. Module-scoped for the reason the clean run is
+    -- the invocation is a whole bake -- and separate from it because an exit
+    code is a property of one process.
+    """
+    tmp = tmp_path_factory.mktemp("rebake_cli_refused")
+    model = _base_checkpoint(
+        keeper_path,
+        tmp,
+        {"node-a": TINY_THRESHOLD},
+        threshold=TINY_THRESHOLD,
+        age=timedelta(0),
+    )
+    report = tmp / "rebake.json"
+    proc = subprocess.run(
+        [
+            sys.executable, str(REBAKE_SCRIPT),
+            "--model", model,
+            "--calibration", gated_fleet_csv(tmp),
+            "--report", str(report),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO,
+    )
+    return {"proc": proc, "model": model, "report": report}
+
+
 class TestRebakeServingCLI:
     def test_a_bake_with_nothing_refused_writes_the_report_and_exits_0(
         self, rebake_run: dict[str, Any]
@@ -1841,6 +1927,118 @@ class TestRebakeServingCLI:
             "serving.pt",
             "serving.staged.pt",
         ]
+
+    def test_a_bake_with_a_refusal_completes_exits_1_and_reports_what_it_held(
+        self, refused_rebake_run: dict[str, Any]
+    ) -> None:
+        # Exit-code row 1 of requirement 5: completed, at least one rejection.
+        # Completed is the half of it the exit code alone does not say, so it
+        # is asserted as what the run left -- a report naming the staged file,
+        # and a staged block carrying the thresholds that stay in force. The
+        # held values are the report's record of the refusal (the same row
+        # shape the accepted path writes, with kept equal to old rather than
+        # to proposed), and the bake really did propose something else: a real
+        # capture against a served threshold of 1e-6. Nothing here is an error
+        # -- exit 2 is a run that never baked -- so stdout says what was held
+        # rather than stderr saying what failed.
+        proc = refused_rebake_run["proc"]
+        report_path = refused_rebake_run["report"]
+
+        assert proc.returncode == 1, proc.stderr
+        assert report_path.is_file()
+
+        report = json.loads(report_path.read_text())
+        assert report["rejected_count"] == 2  # the global and node-a
+        assert report["global"]["verdict"] == "REJECTED-grew"
+        assert report["global"]["kept"] == report["global"]["old"] == TINY_THRESHOLD
+        assert report["global"]["proposed"] > TINY_THRESHOLD  # a real bake, refused
+        assert {rid: row["verdict"] for rid, row in report["per_resource"].items()} == {
+            "node-a": "REJECTED-grew"
+        }
+        assert report["per_resource"]["node-a"]["kept"] == TINY_THRESHOLD
+        assert "refused 2" in proc.stdout  # the operator's reading of the exit code
+        assert Path(report["staged_path"]).is_file()  # completed: a refusal still stages
+
+    def test_the_operator_parameters_are_flags_the_help_documents_with_their_defaults(
+        self,
+    ) -> None:
+        # Requirement 6: the margin, the quantile, the device, and the health
+        # check are the operator's to set, with the constants the code already
+        # carries as their defaults rather than welded in. --help is where an
+        # operator reads them, so the defaults are asserted as the text it
+        # prints, against the constants themselves: argparse prints the two
+        # numeric ones from the values it would actually use, so a default
+        # that drifted from its constant prints a number this test does not
+        # expect rather than the constant's.
+        proc = subprocess.run(
+            [sys.executable, str(REBAKE_SCRIPT), "--help"],
+            capture_output=True,
+            text=True,
+            cwd=REPO,
+        )
+
+        assert proc.returncode == 0, proc.stderr
+        documented = " ".join(proc.stdout.split())  # argparse wraps; the text is one line here
+        for flag in ("--margin", "--quantile", "--device", "--health-check-command"):
+            assert flag in documented
+        assert f"(default: {DEFAULT_MARGIN})" in documented
+        assert f"(default: {DEFAULT_QUANTILE})" in documented
+        assert "(default: the device the keeper detects)" in documented
+        assert f"(default: {rebake_serving.DEFAULT_HEALTH_CHECK})" in documented
+        # The health check is the vector --apply runs, so its default is the
+        # real curl invocation split into one rather than a shell string.
+        paths = ["--model", "m.pt", "--calibration", "c.csv", "--report", "r.json"]
+        assert rebake_serving.parse_args(paths).health_check_command == shlex.split(
+            rebake_serving.DEFAULT_HEALTH_CHECK
+        )
+
+    @pytest.mark.parametrize(
+        ("flags", "expected"),
+        [
+            ([], {"quantile": DEFAULT_QUANTILE, "margin": DEFAULT_MARGIN, "device": None}),
+            (
+                ["--margin", "2.5", "--quantile", "0.95", "--device", "cpu"],
+                {"quantile": 0.95, "margin": 2.5, "device": "cpu"},
+            ),
+        ],
+        ids=["defaults", "operator-set"],
+    )
+    def test_the_parameters_reach_the_run_rather_than_being_parsed_and_dropped(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        flags: list[str],
+        expected: dict[str, Any],
+    ) -> None:
+        # What the two subprocess rows above cannot see: a run with no flags
+        # takes the constants, a run with flags takes the operator's values,
+        # and either way they are what the calibration run is called with. The
+        # bake is not what is replaced here -- the whole run is -- because this
+        # is the CLI's own wiring, and a real bake would take fifteen seconds
+        # to say the same thing. Staging stays on, since the parameters are
+        # additions to the stage-and-report path and not a new one.
+        seen: dict[str, Any] = {}
+        report_path = tmp_path / "rebake.json"
+
+        def recording_run(model_path, calibration, **kwargs):
+            seen.update(model=model_path, calibration=calibration, **kwargs)
+            return {"staged_path": "serving.staged.pt", "rejected_count": 0}, {}
+
+        monkeypatch.setattr(rebake_serving, "run_calibration", recording_run)
+
+        code = rebake_serving.main(
+            ["--model", "serving.pt", "--calibration", "healthy.csv",
+             "--report", str(report_path), *flags]
+        )
+
+        assert code == 0
+        assert seen == {
+            "model": "serving.pt",
+            "calibration": "healthy.csv",
+            "stage": True,
+            **expected,
+        }
+        assert json.loads(report_path.read_text())["staged_path"] == "serving.staged.pt"
 
 
 class TestPackageExports:

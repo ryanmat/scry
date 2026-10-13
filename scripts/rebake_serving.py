@@ -13,6 +13,14 @@ do not move, because promoting that staged copy is the swap below -- a separate
 run, behind ``--apply`` -- so there is a report of a change before there is a
 change.
 
+Those operator inputs are the bake's own -- the margin, the quantile, and the
+device it scores on -- plus the health check a later ``--apply`` runs, each a
+flag defaulting to the constant the code already carries rather than a module
+global welded in (requirement 6). What a completed run exits with is what the
+band decided: 0 with nothing refused, 1 with at least one threshold held back
+(requirement 5). A refusal is not a failure, so both runs leave the same two
+things, a report to read and a staged copy to promote.
+
 ``swap_checkpoint`` is the chain ``--apply`` runs, and it is a function rather
 than a stretch of an argparse body so that it can be driven by a test: the live
 checkpoint, the staged copy, the restart command, and the health check are all
@@ -60,11 +68,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from scry.eval.calibration import run_calibration
+from scry.eval.calibration import DEFAULT_MARGIN, DEFAULT_QUANTILE, run_calibration
 from scry.eval.rubric import SpecError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+DEFAULT_HEALTH_CHECK = "curl -fsS http://localhost:8000/health"
+"""What ``--apply`` asks the restarted service, unless the operator names something else.
+
+The real invocation (spec section 10, requirement 6): ``-f`` is what makes it a
+health check rather than a reachability check, since without it curl exits 0 on
+an error page, and ``-sS`` keeps a passing check quiet while a failing one says
+why. Held as the string an operator would type, because that is what ``--help``
+prints and what ``shlex.split`` turns into the vector the chain runs.
+"""
 
 BACKUP_INFIX = ".backup"
 """What the backup's name carries before the live checkpoint's suffix: ``serving.backup.pt``."""
@@ -186,7 +204,14 @@ def swap_checkpoint(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse the rebake's inputs: what to rebake, from what, and where to report it."""
+    """Parse the rebake's inputs: what to rebake, from what, how, and where to report it.
+
+    The bake's own inputs -- the margin, the quantile, and the device it scores
+    on -- are the operator's here rather than constants welded into a module,
+    and so is the health check a later ``--apply`` runs (requirement 6). Each
+    defaults to what the code already does, so a run that names none of them is
+    the run this CLI made before they existed.
+    """
     parser = argparse.ArgumentParser(
         description=(
             "Rebake a serving checkpoint's thresholds, stage the guarded result beside "
@@ -208,6 +233,38 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         required=True,
         help="Where to write the report JSON: every verdict, and the thresholds kept.",
     )
+    parser.add_argument(
+        "--margin",
+        type=float,
+        default=DEFAULT_MARGIN,
+        help=(
+            "Multiple of each resource's own healthy quantile its fresh threshold "
+            "is taken at (default: %(default)s)."
+        ),
+    )
+    parser.add_argument(
+        "--quantile",
+        type=float,
+        default=DEFAULT_QUANTILE,
+        help=(
+            "Healthy-window quantile the fresh thresholds are taken at "
+            "(default: %(default)s)."
+        ),
+    )
+    parser.add_argument(
+        "--device",
+        default=None,
+        help="Torch device the bake scores on (default: the device the keeper detects).",
+    )
+    parser.add_argument(
+        "--health-check-command",
+        type=shlex.split,
+        default=shlex.split(DEFAULT_HEALTH_CHECK),
+        help=(
+            "Command a later --apply asks whether the restarted service is serving "
+            f"(default: {DEFAULT_HEALTH_CHECK})."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -219,17 +276,32 @@ def main(argv: list[str] | None = None) -> int:
     which is the separation spec section 10, requirement 6 asks for.
 
     Returns:
-        ``0``: the run completed (requirement 5, row 0). The report names the
-        staged checkpoint, so the swap has something to be pointed at.
+        ``0`` when the run completed with nothing refused, ``1`` when it
+        completed with at least one proposal refused by the band (requirement
+        5, rows 0 and 1), counted off the run's own verdicts. A refusal is not
+        a failure of the run: it stages and reports like any other run, and
+        what the 1 says is that some of what is staged is the previous
+        threshold rather than a fresh one -- the report's rows name which, and
+        why.
     """
     args = parse_args(argv)
-    report, _ = run_calibration(args.model, args.calibration, stage=True)
+    report, _ = run_calibration(
+        args.model,
+        args.calibration,
+        quantile=args.quantile,
+        margin=args.margin,
+        device=args.device,
+        stage=True,
+    )
     Path(args.report).write_text(json.dumps(report, indent=2) + "\n")
     print(
         f"rebaked {args.model} against {args.calibration}: "
         f"staged {report['staged_path']}, reported to {args.report}"
     )
-    return 0
+    rejected = report["rejected_count"]
+    if rejected:
+        print(f"refused {rejected} proposal(s): the previous thresholds stay in the staged block")
+    return 1 if rejected else 0
 
 
 if __name__ == "__main__":
