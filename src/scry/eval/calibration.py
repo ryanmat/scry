@@ -89,6 +89,16 @@ checkpoint an operator is serving cannot change before anyone has read what the
 rebake decided. A kept global keeps the provenance of the fit that produced it
 (``quantile``, ``healthy_fpr``, ``n_calibration_windows``), not the discarded
 fit's.
+
+Two of that run's inputs are the operator's standing policy on the serving host
+rather than anything the band weighs, and they land after it: ``exclude`` holds
+a resource out of the map that would be staged whatever the bake proposed for
+it (``excluded-operator``, with the global as what the row keeps, since that is
+what the predictor serves for a resource the map has nothing for), and
+``keep_global`` holds the previous global in force whatever the band decided
+(``kept-operator``, with that global's own provenance on the block, as a band
+rejection leaves it). Both verdicts are lowercase because neither is a refusal:
+a hold says who decided, not that the proposal was wrong.
 """
 
 from __future__ import annotations
@@ -106,7 +116,7 @@ from typing import TYPE_CHECKING
 from scry.eval.rubric import SpecError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Iterable, Mapping, Sequence
     from typing import Any
 
     from scry.eval.hygiene import ResourceEligibility
@@ -135,6 +145,23 @@ A serving entry the bake proposed nothing for and whose recorded value the
 predictor refuses (``nan``, ``inf``, ``-inf``, ``zero``, ``negative``, ``null``).
 The predictor serves the global for it, so the map that stays in force leaves
 it out, and the row's ``kept`` is the global.
+"""
+
+VERDICT_EXCLUDED_OPERATOR = "excluded-operator"
+"""The operator held this resource out of the map that would be staged (``--exclude``).
+
+Standing policy rather than a band decision, so the value is lowercase as the
+``kept-*`` ones are: nothing was refused. The band's reading of the proposal
+stays on the row, and the resource is left out of the map in force, which falls
+it back to the global as an unusable serving value does.
+"""
+
+VERDICT_KEPT_OPERATOR = "kept-operator"
+"""The operator held the previous global in force (``--keep-global``).
+
+Replaces whatever the band decided about the fresh global rather than arguing
+with it, with the proposal that was set aside left on the row. Lowercase for
+the reason above: a hold is not a refusal and is not counted as one.
 """
 
 _GLOBAL_PROVENANCE = ("quantile", "healthy_fpr", "n_calibration_windows")
@@ -905,6 +932,58 @@ def stage_checkpoint(model_path: str | Path, block: Mapping[str, Any]) -> Path:
     return staged
 
 
+def _apply_operator_holds(
+    kept_global: float,
+    kept: Mapping[str, float],
+    verdicts: Sequence[GuardVerdict],
+    *,
+    exclude: Sequence[str],
+    keep_global: bool,
+) -> tuple[float, dict[str, float], list[GuardVerdict]]:
+    """The operator's standing policy over what the band decided, in its shape.
+
+    These two inputs are weekly policy on the serving host rather than
+    arguments the band takes: a resource the operator holds out stays out
+    whatever the bake proposed for it, and a global the operator keeps stays in
+    force whatever the band decided about the fresh one. So each replaces a
+    verdict rather than changing one -- what the band read stays on the row,
+    and the verdict names who decided instead -- and neither is a refusal,
+    since a hold says nothing about the proposal being wrong.
+
+    A held resource is left out of the map that comes back, as an unusable
+    serving value is, and its row then reads the global as what it keeps: what
+    the predictor serves for a resource the map has nothing for. A name in
+    ``exclude`` that matches no resource of the capture and none of the serving
+    block is a ``SpecError``, since a hold that matched nothing would silently
+    stage the very resource it was written to keep out.
+    """
+    held = set(exclude)
+    decided_about = {v.resource_id for v in verdicts if v.resource_id is not None}
+    unknown = sorted(held - decided_about)
+    if unknown:
+        raise SpecError(
+            f"--exclude names {', '.join(unknown)}, which no resource of the capture or of "
+            "the serving block answers to. An exclusion that matches nothing would stage "
+            "the resource it was meant to hold out; check the spelling against the "
+            "per_resource rows of the last report."
+        )
+
+    stays = {resource_id: value for resource_id, value in kept.items() if resource_id not in held}
+    decided: list[GuardVerdict] = []
+    for verdict in verdicts:
+        if verdict.resource_id is None and keep_global:
+            # The previous global, which the band measured the fresh one
+            # against: never None, since a run whose serving block had no
+            # usable global was refused upstream, before the band saw it.
+            kept_global = verdict.old
+            decided.append(replace(verdict, verdict=VERDICT_KEPT_OPERATOR))
+        elif verdict.resource_id in held:
+            decided.append(replace(verdict, verdict=VERDICT_EXCLUDED_OPERATOR))
+        else:
+            decided.append(verdict)
+    return kept_global, stays, decided
+
+
 def run_calibration(
     model_path: str | Path,
     calibration: str,
@@ -916,6 +995,8 @@ def run_calibration(
     calibration_days: float | None = None,
     seed_path: str | Path | None = None,
     allow_drift: bool = False,
+    exclude: Sequence[str] | None = None,
+    keep_global: bool = False,
     dry_run: bool = True,
     stage: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -941,6 +1022,13 @@ def run_calibration(
         seed_path: The ``--seed`` file, for values the serving block has
             nothing usable for (requirement 1).
         allow_drift: Keep values the band rejected, restamped.
+        exclude: Resources the operator holds out of the map that would be
+            staged, whatever the bake proposes for them; the predictor serves
+            the global for a resource the map has nothing for. A name no
+            resource of the capture or of the serving block answers to is a
+            spec error.
+        keep_global: Hold the previous global threshold in force whatever the
+            band decided about the fresh one.
         dry_run: Whether this run stops short of a live swap. A report field
             rather than a property of the exit code (requirement 5).
         stage: Whether to write the staged checkpoint beside ``model_path``.
@@ -961,11 +1049,15 @@ def run_calibration(
         proposal reached (the ``kept-*`` rows), ``global_kept`` says
         whether the previous global is what stays in force, and when it is,
         the block keeps that global's own ``quantile``, ``healthy_fpr``, and
-        ``n_calibration_windows`` rather than the discarded fit's.
+        ``n_calibration_windows`` rather than the discarded fit's. Beside
+        those two, which the run derives, are the operator's own inputs as
+        given: ``excluded`` lists the resources held out of the map and
+        ``keep_global`` says whether the previous global was held in force.
 
     Raises:
         SpecError: If a value the band needs is neither usable in the serving
-            block nor usably supplied by the seed.
+            block nor usably supplied by the seed, or if ``exclude`` names a
+            resource this rebake decided nothing about.
         ValueError: If the capture produces no windows to bake from.
     """
     serving = _serving_block(model_path)
@@ -982,10 +1074,16 @@ def run_calibration(
         seed_path=seed_path,
         allow_drift=allow_drift,
     )
+    # The operator's holds land after the band and not inside it: policy is not
+    # a band decision, and what it replaces is the decision the band reached.
+    excluded = list(exclude or ())
+    kept_global, kept, verdicts = _apply_operator_holds(
+        kept_global, kept, verdicts, exclude=excluded, keep_global=keep_global
+    )
     # The stamp form provenance writes and _parse_stamp reads, so the block
     # stamped here is one the next run can age.
     generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    global_kept = kept_global != block["threshold"]
+    global_kept = keep_global or kept_global != block["threshold"]
     # A kept global describes the fit that produced it; the bake's quantile,
     # fpr, and window count belong to the fit whose threshold was refused.
     provenance = (
@@ -1013,6 +1111,8 @@ def run_calibration(
         allow_drift=bool(allow_drift),
         omitted=[v.resource_id for v in verdicts if v.resource_id and v.proposed is None],
         global_kept=global_kept,
+        excluded=excluded,
+        keep_global=bool(keep_global),
         bake_warnings=warnings,
         rejected_count=sum(v.verdict in _REJECTIONS for v in verdicts),
     )

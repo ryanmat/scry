@@ -118,6 +118,17 @@ scores on, and the health check a later ``--apply`` runs -- are pinned as flags
 whose defaults are the constants the code already carries, documented in
 ``--help`` where an operator reads them, and pinned to reach the run rather
 than to be parsed and dropped.
+
+Two further inputs are standing policy on the serving host rather than
+parameters of the bake, and they are pinned as holds the band does not get a
+say in. ``--exclude`` keeps a resource out of the map that would be staged
+whatever the bake proposed for it -- the proposal stays on its row and the
+global is what it falls back to -- and a name no resource answers to is a spec
+error rather than a silent no-op that would stage what it was meant to hold
+out. ``--keep-global`` holds the previous global in force whatever the band
+decided about the fresh one, with that global's own fit carried on the block as
+a band rejection leaves it. Neither is a refusal, so neither moves the exit
+code, and both are recorded on the report under their own names.
 """
 
 from __future__ import annotations
@@ -1468,6 +1479,8 @@ class TestCalibrationRun:
             "allow_drift",
             "omitted",
             "global_kept",
+            "excluded",
+            "keep_global",
             "bake_warnings",
             "rejected_count",
         }
@@ -1642,6 +1655,71 @@ class TestCalibrationRun:
 
         assert seen["device"] == "meta"
         assert seen["parameters"] == {"meta"}  # the weights moved, not just the label
+
+    def test_an_excluded_resource_is_held_out_of_the_map_that_would_be_staged(
+        self, keeper_path: str, tmp_path: Path
+    ) -> None:
+        # Standing operator policy rather than a band decision: node-a is held
+        # out of the map that would be staged whatever the bake proposed for
+        # it, so the predictor falls it back to the global -- which is what
+        # its row says, carrying the proposal that was set aside beside the
+        # global as the value it keeps. The two gate-omitted resources are the
+        # control: they keep their own thresholds, and `omitted` goes on
+        # naming them while `excluded` names exactly what the operator asked
+        # for. A name no resource of the capture or of the serving block
+        # answers to is the error it is, since an exclusion that silently
+        # matched nothing would stage the resource it was meant to hold out.
+        model = _base_checkpoint(keeper_path, tmp_path, CLEAN_PER_RESOURCE)
+        healthy = gated_fleet_csv(tmp_path)
+
+        report, block = run_calibration(model, healthy, profile=PROFILE, exclude=["node-a"])
+
+        row = report["per_resource"]["node-a"]
+        assert row["verdict"] == "excluded-operator"
+        assert row["proposed"] > 0.0 and row["proposed"] != row["old"]  # the bake's, recorded
+        assert row["kept"] == report["global"]["kept"]  # the global is what serves node-a now
+        assert block["per_resource"] == {"node-b": 0.21, "node-c": 0.22}  # node-a left out
+        assert report["excluded"] == ["node-a"]
+        assert report["omitted"] == ["node-b", "node-c"]  # the gates' own, untouched
+        assert report["keep_global"] is False
+        assert report["global_kept"] is False  # the fresh global serves; only node-a was held
+        assert report["rejected_count"] == 0  # a hold is not a refusal
+        assert json.loads(json.dumps(report, allow_nan=False)) == report
+
+        with pytest.raises(SpecError, match="node-z"):
+            run_calibration(model, healthy, profile=PROFILE, exclude=["node-z"])
+
+    def test_keeping_the_global_holds_it_in_force_whatever_the_band_decided(
+        self, keeper_path: str, tmp_path: Path
+    ) -> None:
+        # The other standing policy. The band accepts this bake's global --
+        # the serving block is half a year old, so the grow limit is 1.5**26
+        # -- and the operator's hold replaces that decision rather than
+        # arguing with it: the previous global is what stays in force and what
+        # the block carries, with the fit it came from carried beside it
+        # exactly as a band rejection leaves it, and the proposal that was set
+        # aside recorded on the row. The per-resource map is decided as it
+        # would have been, so the hold is the global's alone.
+        model = _base_checkpoint(keeper_path, tmp_path, CLEAN_PER_RESOURCE)
+        healthy = gated_fleet_csv(tmp_path)
+
+        report, block = run_calibration(model, healthy, profile=PROFILE, keep_global=True)
+
+        assert report["global"]["verdict"] == "kept-operator"
+        assert report["global"]["kept"] == report["global"]["old"] == BASE_GLOBAL
+        assert report["global"]["proposed"] > 0.0  # a real bake, held rather than refused
+        assert report["global"]["proposed"] != BASE_GLOBAL
+        assert report["keep_global"] is True
+        assert report["global_kept"] is True  # the previous global is what stays in force
+        assert report["rejected_count"] == 0  # an operator's hold is not a band refusal
+        assert report["excluded"] == []
+
+        assert block["threshold"] == BASE_GLOBAL
+        assert report["per_resource"]["node-a"]["verdict"] == "accepted"
+        assert block["per_resource"]["node-a"] == report["per_resource"]["node-a"]["kept"]
+        # The held global keeps the fit it came from, not the discarded one's.
+        assert {key: block[key] for key in BASE_PROVENANCE} == BASE_PROVENANCE
+        assert json.loads(json.dumps(report, allow_nan=False)) == report
 
 
 class TestSwapChain:
@@ -1862,6 +1940,38 @@ def refused_rebake_run(
     return {"proc": proc, "model": model, "report": report}
 
 
+@pytest.fixture(scope="module")
+def policy_rebake_run(
+    keeper_path: str, tmp_path_factory: pytest.TempPathFactory
+) -> dict[str, Any]:
+    """The same CLI run carrying the operator's standing policy: two holds and the global.
+
+    Module-scoped and a real subprocess for the reason the two runs above are
+    -- the invocation is a whole bake -- and separate from them because the
+    flags are only shown to reach the run by a process that parsed them.
+    ``--exclude`` is given twice, since repeatable is a property of the parser
+    that one name cannot measure.
+    """
+    tmp = tmp_path_factory.mktemp("rebake_cli_policy")
+    model = _base_checkpoint(keeper_path, tmp, CLEAN_PER_RESOURCE)
+    report = tmp / "rebake.json"
+    proc = subprocess.run(
+        [
+            sys.executable, str(REBAKE_SCRIPT),
+            "--model", model,
+            "--calibration", gated_fleet_csv(tmp),
+            "--report", str(report),
+            "--exclude", "node-a",
+            "--exclude", "node-b",
+            "--keep-global",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO,
+    )
+    return {"proc": proc, "model": model, "report": report}
+
+
 class TestRebakeServingCLI:
     def test_a_bake_with_nothing_refused_writes_the_report_and_exits_0(
         self, rebake_run: dict[str, Any]
@@ -2036,9 +2146,36 @@ class TestRebakeServingCLI:
             "model": "serving.pt",
             "calibration": "healthy.csv",
             "stage": True,
+            "exclude": [],  # no hold is the empty policy, not an absent keyword
+            "keep_global": False,
             **expected,
         }
         assert json.loads(report_path.read_text())["staged_path"] == "serving.staged.pt"
+
+    def test_the_operator_holds_reach_the_run_and_the_report_records_both(
+        self, policy_rebake_run: dict[str, Any]
+    ) -> None:
+        # The operator's standing policy through the CLI, measured where it
+        # lands: --exclude is repeatable and both names reach the run, and
+        # --keep-global holds the global the serving block already carried.
+        # The report records both inputs by name, and the staged checkpoint --
+        # what a later --apply would promote -- is the consequence: neither
+        # held resource is in its map, node-c, which nobody held, still is,
+        # and the global is the operator's. Nothing is refused, since a hold
+        # is policy rather than a band decision, so the run is exit-code row 0.
+        proc = policy_rebake_run["proc"]
+        report = json.loads(policy_rebake_run["report"].read_text())
+
+        assert proc.returncode == 0, proc.stderr
+        assert report["excluded"] == ["node-a", "node-b"]  # both, in the order given
+        assert report["keep_global"] is True
+        assert report["global"]["verdict"] == "kept-operator"
+        assert report["per_resource"]["node-a"]["verdict"] == "excluded-operator"
+        assert report["rejected_count"] == 0
+
+        serving = _checkpoint(Path(report["staged_path"]))["serving"]
+        assert serving["threshold"] == BASE_GLOBAL == report["global"]["kept"]
+        assert serving["per_resource"] == {"node-c": 0.22}  # the two held are out of the map
 
 
 class TestPackageExports:

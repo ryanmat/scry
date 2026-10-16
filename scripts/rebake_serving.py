@@ -16,10 +16,14 @@ change.
 Those operator inputs are the bake's own -- the margin, the quantile, and the
 device it scores on -- plus the health check a later ``--apply`` runs, each a
 flag defaulting to the constant the code already carries rather than a module
-global welded in (requirement 6). What a completed run exits with is what the
-band decided: 0 with nothing refused, 1 with at least one threshold held back
-(requirement 5). A refusal is not a failure, so both runs leave the same two
-things, a report to read and a staged copy to promote.
+global welded in (requirement 6). Beside them are the two the operator decides
+rather than the band: ``--exclude`` holds a resource out of the staged map
+whatever the bake proposes for it, and ``--keep-global`` holds the global
+already in force. What a completed run exits with is what the band decided: 0
+with nothing refused, 1 with at least one threshold held back (requirement 5).
+A refusal is not a failure, so both runs leave the same two things, a report to
+read and a staged copy to promote; neither hold is a refusal either, so neither
+moves the exit code.
 
 ``swap_checkpoint`` is the chain ``--apply`` runs, and it is a function rather
 than a stretch of an argparse body so that it can be driven by a test: the live
@@ -211,6 +215,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     and so is the health check a later ``--apply`` runs (requirement 6). Each
     defaults to what the code already does, so a run that names none of them is
     the run this CLI made before they existed.
+
+    ``--exclude`` and ``--keep-global`` are of a different kind: standing policy
+    on the serving host, applied after the band rather than weighed by it, and
+    so they default to holding nothing and keeping nothing.
     """
     parser = argparse.ArgumentParser(
         description=(
@@ -257,6 +265,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Torch device the bake scores on (default: the device the keeper detects).",
     )
     parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="RESOURCE",
+        help=(
+            "Hold a resource out of the staged per-resource map whatever the bake "
+            "proposes for it; it falls back to the global threshold. Repeatable."
+        ),
+    )
+    parser.add_argument(
+        "--keep-global",
+        action="store_true",
+        help=(
+            "Hold the global threshold the checkpoint already serves in force, "
+            "whatever the band decides about the freshly baked one."
+        ),
+    )
+    parser.add_argument(
         "--health-check-command",
         type=shlex.split,
         default=shlex.split(DEFAULT_HEALTH_CHECK),
@@ -291,6 +317,8 @@ def main(argv: list[str] | None = None) -> int:
         quantile=args.quantile,
         margin=args.margin,
         device=args.device,
+        exclude=args.exclude,
+        keep_global=args.keep_global,
         stage=True,
     )
     Path(args.report).write_text(json.dumps(report, indent=2) + "\n")
