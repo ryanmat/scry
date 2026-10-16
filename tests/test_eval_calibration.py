@@ -60,7 +60,10 @@ floors at one day, the narrowest band a same-day rebake can claim.
 real capture: the bake proposes, the band decides, the age anchor supplies the
 weeks, and what comes back is the report beside the serving block that would be
 staged -- in memory, with the base checkpoint byte-identical afterwards, since
-writing anything at all is the staging step's and the swap's business.
+writing anything at all is the staging step's and the swap's business. Its
+setup is the bake's own (``scry.eval.bake.prepare_bake``), so a calibration
+capture that lacks a feature the checkpoint was trained on warns here exactly
+as it does under the script, and the warning rides the report.
 
 ``build_rebake_report`` assembles what an operator reads afterwards, and is
 pinned on the two things a report of a rejection has to survive. It is strict
@@ -152,7 +155,7 @@ import numpy as np
 import pytest
 import rebake_serving
 from rebake_serving import swap_checkpoint
-from synth import PROFILE, gated_fleet_csv
+from synth import MISSING_FEATURE, PROFILE, gated_fleet_csv, missing_feature_csv
 
 from scry.eval.calibration import (
     DEFAULT_MARGIN,
@@ -1620,6 +1623,34 @@ class TestCalibrationRun:
         )
         assert {key: block[key] for key in BASE_PROVENANCE} == expected
         assert block["threshold"] == report["global"]["kept"]
+        assert json.loads(json.dumps(report, allow_nan=False)) == report
+
+    def test_the_run_warns_when_the_calibration_capture_lacks_a_trained_feature(
+        self, keeper_path: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The rebake path prints the warning bake() prints, because both run
+        # the one setup. A capture missing a feature the checkpoint trained on
+        # windows that feature neutral, so every threshold the run proposes
+        # was measured against data the model never sees in production --
+        # which is the fact an operator reading the report has to be told. It
+        # reaches stderr as the gate warnings do and rides the report in
+        # bake_warnings, where a reader who was not watching the terminal
+        # finds it. No gate warning joins it: a feature absent from the whole
+        # capture makes nobody divergent.
+        model = _base_checkpoint(keeper_path, tmp_path, USABLE_A)
+        healthy = missing_feature_csv(tmp_path)
+
+        report, _ = run_calibration(model, healthy, profile=PROFILE)
+
+        expected = (
+            f"warning: {healthy} lacks 1 feature(s) the checkpoint was trained "
+            f"on ({MISSING_FEATURE}); the baked threshold will not match what "
+            "the model sees on complete data."
+        )
+        assert report["bake_warnings"] == [expected]
+        assert expected in capsys.readouterr().err  # re-emitted, not swallowed
+        assert report["global"]["proposed"] > 0.0  # the bake ran, warning and all
+        assert report["per_resource"]["node-a"]["proposed"] > 0.0
         assert json.loads(json.dumps(report, allow_nan=False)) == report
 
     def test_the_bake_scores_on_the_device_the_run_was_given(
