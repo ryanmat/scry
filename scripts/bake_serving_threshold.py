@@ -12,6 +12,11 @@ false-positive rate), and writes a ``serving`` block into the checkpoint:
 serving API reads this block to turn a per-window reconstruction error into an
 alertable ratio.
 
+The setup every bake starts with -- the keeper, the capture, and the window
+step, with a warning when the capture lacks a trained feature -- is
+``scry.eval.bake.prepare_bake``, shared with the rebake path so the two
+cannot bake from differently assembled inputs.
+
 The holdout is from THRESHOLD FITTING only. When the healthy capture is also the
 data the model trained on, ``healthy_fpr`` is in-sample for the model and will
 understate the live rate; bake against a fresh healthy capture disjoint from the
@@ -27,7 +32,6 @@ Example:
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
 import math
 import sys
@@ -38,9 +42,8 @@ import numpy as np
 import pandas as pd
 import torch
 
-from scry.data.fetcher import fetch_full_capture
-from scry.data.quality import missing_features
 from scry.data.windowing import build_windows
+from scry.eval.bake import OMITTED_FALLBACK, RECON_METRIC, prepare_bake
 from scry.eval.hygiene import (
     MIN_PER_RESOURCE_WINDOWS,
     REASON_DIVERGENT,
@@ -48,23 +51,8 @@ from scry.eval.hygiene import (
     ResourceEligibility,
     per_resource_eligibility,
 )
-from scry.model.checkpoint import Keeper, load_keeper
+from scry.model.checkpoint import Keeper
 from scry.model.reconstruction import healthy_threshold, reconstruction_errors
-from scry.utils.config import get_config
-
-# Identifies how the score was computed, so a serving block is never misread as a
-# different metric (e.g. numerical+categorical error) at a different scale.
-RECON_METRIC = "numerical_mse_from_mu"
-
-# What an omitted resource serves, in both situations: a first bake has nothing
-# for it and it falls back to the global threshold, while a re-bake
-# (scry.eval.calibration) keeps the threshold it is already serving rather than
-# moving it, which the old "it will serve the global threshold" wording promised
-# it would not do.
-OMITTED_FALLBACK = (
-    "It is omitted from the per-resource map: it keeps its previous threshold "
-    "where it has one, and serves the global threshold where it does not."
-)
 
 
 def compute_serving_block(
@@ -211,22 +199,9 @@ def bake(
     Returns:
         The serving block that was written.
     """
-    keeper = load_keeper(model_path)
-    profile = profile or keeper.profile
-    step = int(get_config().window_step)
-    df_long = asyncio.run(
-        fetch_full_capture(healthy_data, profile=profile, data_format=data_format)
+    keeper, df_long, step = prepare_bake(
+        model_path, healthy_data, profile=profile, data_format=data_format
     )
-    # A profile that no longer lists a trained feature strips it from the
-    # fetch; the threshold would then be calibrated on neutral-filled windows.
-    missing = missing_features(df_long, keeper.numerical_features)
-    if missing:
-        print(
-            f"warning: {healthy_data} lacks {len(missing)} feature(s) the "
-            f"checkpoint was trained on ({', '.join(missing)}); the baked "
-            "threshold will not match what the model sees on complete data.",
-            file=sys.stderr,
-        )
     serving, eligibility = compute_serving_block(
         keeper, df_long, quantile=quantile, step=step, per_resource_margin=per_resource_margin
     )

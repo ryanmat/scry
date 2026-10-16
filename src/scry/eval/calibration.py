@@ -79,14 +79,16 @@ measured against. Promoting the copy is the swap's business, behind
 moved.
 
 ``run_calibration`` is the run itself, composed from all of the above, and the
-module's I/O: it loads the checkpoint, fetches the capture, runs the bake's own
-arithmetic against the base model, reads the clock once for ``generated_at``,
-then applies the age anchor, the guard, and the report -- which carries the
-run's inputs and the bake's warnings beside the verdicts, so the document says
-what was baked, from what, and how much of it was refused. It returns that
-report and the serving block a swap would put in force, both in memory: the
-checkpoint an operator is serving cannot change before anyone has read what the
-rebake decided. A kept global keeps the provenance of the fit that produced it
+module's I/O: it loads the checkpoint, runs the bake's own setup
+(``scry.eval.bake.prepare_bake``) and its own arithmetic against the base
+model, reads the clock once for ``generated_at``, then applies the age anchor,
+the guard, and the report -- which carries the run's inputs and the bake's
+warnings beside the verdicts (the trained features the capture lacks, and the
+resources the hygiene gates dropped), so the document says what was baked,
+from what, and how much of it was refused. It returns that report and the
+serving block a swap would put in force, both in memory: the checkpoint an
+operator is serving cannot change before anyone has read what the rebake
+decided. A kept global keeps the provenance of the fit that produced it
 (``quantile``, ``healthy_fpr``, ``n_calibration_windows``), not the discarded
 fit's.
 
@@ -113,6 +115,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from scry.eval.bake import prepare_bake
 from scry.eval.rubric import SpecError
 
 if TYPE_CHECKING:
@@ -833,28 +836,24 @@ def _bake(
 ) -> tuple[dict[str, Any], Mapping[str, ResourceEligibility] | None, list[str]]:
     """Bake against the BASE model and take the serving block it would write.
 
-    The arithmetic is ``scripts/bake_serving_threshold.py``'s own rather than a
-    second copy of it here to drift from it -- the reason the bake delegates its
-    gates to ``scry.eval.hygiene`` instead of keeping its own. Its CLI writes
-    the block into a checkpoint; this takes the block itself, so a proposal can
-    be guarded before anything at all is written. Returned beside it: the
-    hygiene verdicts behind its ``per_resource`` map (omission provenance,
-    requirement 4), and the warning lines it printed, which name the resources
-    it could not propose for and are re-emitted on stderr as well as reported.
+    The setup is ``prepare_bake``, the bake's own, and the arithmetic is
+    ``scripts/bake_serving_threshold.py``'s own rather than a second copy of
+    either here to drift from them -- the reason the bake delegates its gates
+    to ``scry.eval.hygiene`` instead of keeping its own, and the reason this
+    prints the same missing-feature warning the script does. The script's
+    CLI writes the block into a checkpoint; this takes the block itself, so a
+    proposal can be guarded before anything at all is written. Returned
+    beside it: the hygiene verdicts behind its ``per_resource`` map (omission
+    provenance, requirement 4), and the warning lines printed by the setup
+    and the bake, which name the capture's missing features and the resources
+    it could not propose for, and are re-emitted on stderr as well as
+    reported.
 
     A keeper detects its own device; ``device`` is the operator's override of
     that detection, and the loaded model is moved onto it before the bake
     scores, because the device the keeper carries is the one the scoring runs
     on.
     """
-    import asyncio
-
-    # local: load_keeper pulls in torch, and this module stays importable
-    # without it, as _serving_block's import says.
-    from scry.data.fetcher import fetch_full_capture
-    from scry.model.checkpoint import load_keeper
-    from scry.utils.config import get_config
-
     # The scripts directory is not a package: it is already importable when the
     # rebake CLI runs beside it (and under the test suite), and is added from
     # this checkout otherwise.
@@ -863,19 +862,19 @@ def _bake(
         sys.path.append(str(scripts))
     import bake_serving_threshold
 
-    keeper = load_keeper(str(model_path))
-    if device is not None and device != keeper.device:
-        keeper.model.to(device)
-        keeper.device = device
-    df_long = asyncio.run(fetch_full_capture(calibration, profile=profile or keeper.profile))
     stderr = io.StringIO()
     try:
         with contextlib.redirect_stderr(stderr):
+            # Inside the redirect, so the setup's own warning is reported and
+            # re-emitted beside the bake's rather than escaping both.
+            keeper, df_long, step = prepare_bake(
+                model_path, calibration, profile=profile, device=device
+            )
             block, eligibility = bake_serving_threshold.compute_serving_block(
                 keeper,
                 df_long,
                 quantile=quantile,
-                step=int(get_config().window_step),
+                step=step,
                 per_resource_margin=margin,
             )
     finally:

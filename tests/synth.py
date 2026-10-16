@@ -6,7 +6,9 @@
 A small subset of the aro_node profile: three numerical series with sinusoidal
 baselines plus noise, and two always-available categorical flags. Optional spike
 (step) or ramp (gradual precursor) injections drive the reconstruction error up
-for anomaly tests.
+for anomaly tests. Two fleet shapes are assembled from them for the bake: one
+whose resources trip the per-resource hygiene gates, and one whose capture
+lacks a trained feature altogether.
 """
 
 from __future__ import annotations
@@ -100,6 +102,23 @@ def gated_fleet_csv(tmp_path: Path) -> str:
     df_c, _ = gen_capture("node-c", 140, seed=53)
     fleet = pd.concat([df_a, df_b, df_c], ignore_index=True)
     return write_csv(fleet, tmp_path / "gated_fleet.csv")
+
+
+# The trained feature missing_feature_csv drops; one of SERIES.
+MISSING_FEATURE = "fsUsedBytes"
+
+
+def missing_feature_csv(tmp_path: Path) -> str:
+    """One healthy resource whose capture lacks ``MISSING_FEATURE`` entirely.
+
+    The capture-wide absence a keeper's own feature list is checked against:
+    windowing fills the dropped feature neutral, so the thresholds baked from
+    it are not the ones the model produces on complete data. No per-resource
+    hygiene gate sees it -- a feature absent from the whole capture makes
+    nobody divergent -- so the only warning such a bake prints is this one.
+    """
+    df, _ = gen_capture("node-a", 600, seed=61)
+    return write_csv(df[df["metric_name"] != MISSING_FEATURE], tmp_path / "missing_feature.csv")
 
 
 def write_labels(path: Path, entries: list[dict[str, str]]) -> str:

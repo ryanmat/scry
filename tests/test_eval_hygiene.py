@@ -1,5 +1,5 @@
 # Description: Tests for scry.eval.hygiene: the three per-resource eligibility gates.
-# Description: Pins the bake's delegation to them and the torch-free import contract.
+# Description: Pins the bake's delegation to them and to scry.eval.bake, and the torch-free import.
 
 """Tests for the per-resource eligibility gates.
 
@@ -14,7 +14,17 @@ The bake-delegation tests run the real bake on a gated synthetic fleet and pin
 the printed eligibility map, its agreement with the per_resource map, the
 stderr warning text (each warning naming the gate that omitted the resource
 and what the resource serves afterwards), and the compute_serving_block
-exposure.
+exposure. They also pin what the bake script takes from the package rather than
+holding itself: its setup (``scry.eval.bake.prepare_bake``) and the two
+constants that name the metric and what an omitted resource serves, which the
+script imports rather than defines, so the package and the script cannot carry
+two wordings of either.
+
+``prepare_bake`` is the setup the script and the rebake path share, pinned on
+what it hands the bake -- the keeper, the long-format capture, and the window
+step -- on the device override it applies to the keeper's model, and on the
+warning it prints when the capture lacks a feature the checkpoint was trained
+on, which reaches the rebake path through it.
 """
 
 from __future__ import annotations
@@ -29,9 +39,10 @@ from pathlib import Path
 import bake_serving_threshold as bake_mod
 import numpy as np
 import pytest
-from synth import PROFILE, gated_fleet_csv
+from synth import MISSING_FEATURE, PROFILE, SERIES, gated_fleet_csv, missing_feature_csv
 
 from scry.data.fetcher import fetch_full_capture
+from scry.eval.bake import OMITTED_FALLBACK, RECON_METRIC, prepare_bake
 from scry.eval.calibration import DEFAULT_QUANTILE
 from scry.eval.hygiene import (
     MIN_PER_RESOURCE_WINDOWS,
@@ -42,6 +53,8 @@ from scry.eval.hygiene import (
     ResourceEligibility,
     per_resource_eligibility,
 )
+from scry.model.checkpoint import load_keeper
+from scry.utils.config import get_config
 
 _TRAINED = ("cpu", "mem", "fs")
 
@@ -329,7 +342,7 @@ class TestBakeDelegation:
         # produces a NaN quantile on demand; the branch it drives is the real
         # one, printed by the real bake.
         healthy = gated_fleet_csv(tmp_path)
-        keeper = bake_mod.load_keeper(keeper_path)
+        keeper = load_keeper(keeper_path)
         df_long = await fetch_full_capture(healthy, profile=PROFILE)
         monkeypatch.setattr(
             bake_mod,
@@ -371,11 +384,31 @@ class TestBakeDelegation:
         source = Path(bake_mod.__file__).read_text()
         assert not re.search(r"^MIN_PER_RESOURCE_WINDOWS\s*=", source, re.MULTILINE)
 
+    def test_bake_module_takes_its_setup_and_constants_from_the_package(self) -> None:
+        # The script is a CLI over package code, not a second copy of it: the
+        # setup it shares with the rebake path lives in scry.eval.bake and the
+        # script calls it, so the two cannot drift; a second copy of the setup
+        # is how one path loses the missing-feature warning.
+        assert bake_mod.prepare_bake is prepare_bake
+        assert bake_mod.RECON_METRIC is RECON_METRIC
+        assert bake_mod.OMITTED_FALLBACK is OMITTED_FALLBACK
+
+        source = Path(bake_mod.__file__).read_text()
+        assert "prepare_bake(" in source  # called, not merely imported
+        # The script keeps no feature check of its own and no second wording
+        # of the warning that check prints.
+        assert "missing_features(" not in source
+        assert "the checkpoint was trained on" not in source
+        # Both constants are imported, never redefined locally (equality alone
+        # would not catch a shadowing definition, as above).
+        for name in ("RECON_METRIC", "OMITTED_FALLBACK"):
+            assert not re.search(rf"^{name}\s*=", source, re.MULTILINE)
+
     async def test_compute_serving_block_exposes_eligibility(
         self, keeper_path: str, tmp_path: Path
     ) -> None:
         healthy = gated_fleet_csv(tmp_path)
-        keeper = bake_mod.load_keeper(keeper_path)
+        keeper = load_keeper(keeper_path)
         df_long = await fetch_full_capture(healthy, profile=PROFILE)
 
         serving, eligibility = bake_mod.compute_serving_block(
@@ -389,6 +422,63 @@ class TestBakeDelegation:
         assert without_margin is None
 
 
+class TestPrepareBake:
+    def test_it_returns_the_keeper_the_capture_and_the_window_step(
+        self, keeper_path: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The three things a bake needs before it can score anything,
+        # assembled once for the script and the rebake path alike. The
+        # step comes from the config rather than from a caller, which is why
+        # it is returned at all.
+        healthy = gated_fleet_csv(tmp_path)
+
+        keeper, df_long, step = prepare_bake(keeper_path, healthy, profile=PROFILE)
+
+        assert keeper.numerical_features == list(SERIES)  # the checkpoint's own schema
+        assert set(df_long["resource_id"].unique()) == {"node-a", "node-b", "node-c"}
+        assert step == int(get_config().window_step)
+        assert capsys.readouterr().err == ""  # a complete capture warns about nothing
+
+    def test_it_warns_when_the_capture_lacks_a_trained_feature(
+        self, keeper_path: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # bake()'s missing-feature warning, in its wording, printed for every
+        # caller of the setup: a capture missing a trained feature is windowed
+        # with that feature filled neutral, so the threshold it produces is
+        # not the one the model sees on complete data.
+        healthy = missing_feature_csv(tmp_path)
+
+        keeper, df_long, _ = prepare_bake(keeper_path, healthy, profile=PROFILE)
+
+        assert capsys.readouterr().err == (
+            f"warning: {healthy} lacks 1 feature(s) the checkpoint was trained "
+            f"on ({MISSING_FEATURE}); the baked threshold will not match what "
+            "the model sees on complete data.\n"
+        )
+        assert MISSING_FEATURE in keeper.numerical_features  # trained on it
+        assert MISSING_FEATURE not in set(df_long["metric_name"])  # and it is not there
+
+    def test_it_moves_the_keeper_onto_the_device_it_is_given(
+        self, keeper_path: str, tmp_path: Path
+    ) -> None:
+        # ``meta`` is the device for this, because every torch build has it
+        # and it allocates nothing -- on a CPU-only host a run asked for
+        # ``cpu`` and a run that ignored its device are indistinguishable.
+        # The weights move, not just the label the keeper carries, since the
+        # label is what the scoring call passes and the weights are what it
+        # runs on.
+        healthy = gated_fleet_csv(tmp_path)
+
+        moved, _, _ = prepare_bake(keeper_path, healthy, profile=PROFILE, device="meta")
+        default, _, _ = prepare_bake(keeper_path, healthy, profile=PROFILE)
+
+        assert moved.device == "meta"
+        assert {p.device.type for p in moved.model.parameters()} == {"meta"}
+        # No device named leaves the keeper's own detection in force.
+        assert default.device != "meta"
+        assert "meta" not in {p.device.type for p in default.model.parameters()}
+
+
 class TestTorchFreeImport:
     def test_hygiene_module_imports_without_torch(self) -> None:
         proc = subprocess.run(
@@ -396,6 +486,21 @@ class TestTorchFreeImport:
                 sys.executable,
                 "-c",
                 "import scry.eval.hygiene, sys; assert 'torch' not in sys.modules",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+
+    def test_bake_module_imports_without_torch(self) -> None:
+        # The bake's setup lives in the package so the image can reach it
+        # (`pip install .` copies src alone), and the package stays importable
+        # where torch is not: load_keeper is reached inside prepare_bake.
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import scry.eval.bake, sys; assert 'torch' not in sys.modules",
             ],
             capture_output=True,
             text=True,
