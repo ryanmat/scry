@@ -42,7 +42,8 @@ import pytest
 from synth import MISSING_FEATURE, PROFILE, SERIES, gated_fleet_csv, missing_feature_csv
 
 from scry.data.fetcher import fetch_full_capture
-from scry.eval.bake import OMITTED_FALLBACK, RECON_METRIC, prepare_bake
+from scry.eval import bake as bake_pkg
+from scry.eval.bake import prepare_bake
 from scry.eval.calibration import DEFAULT_QUANTILE
 from scry.eval.hygiene import (
     MIN_PER_RESOURCE_WINDOWS,
@@ -345,7 +346,7 @@ class TestBakeDelegation:
         keeper = load_keeper(keeper_path)
         df_long = await fetch_full_capture(healthy, profile=PROFILE)
         monkeypatch.setattr(
-            bake_mod,
+            bake_pkg,
             "per_resource_eligibility",
             lambda **kwargs: {
                 rid: ResourceEligibility(
@@ -377,24 +378,28 @@ class TestBakeDelegation:
         assert DEFAULT_QUANTILE == inspect.signature(bake_mod.bake).parameters["quantile"].default
 
     def test_bake_module_delegates_to_hygiene(self) -> None:
-        assert bake_mod.per_resource_eligibility is per_resource_eligibility
-        assert bake_mod.MIN_PER_RESOURCE_WINDOWS == MIN_PER_RESOURCE_WINDOWS
+        # The gates are the bake's, so the delegation sits wherever the bake
+        # does: scry.eval.bake, since compute_serving_block moved there.
+        assert bake_pkg.per_resource_eligibility is per_resource_eligibility
+        assert bake_pkg.MIN_PER_RESOURCE_WINDOWS == MIN_PER_RESOURCE_WINDOWS
         # The constant is imported, never redefined locally (equality alone
         # would not catch a shadowing `MIN_PER_RESOURCE_WINDOWS = 50`).
-        source = Path(bake_mod.__file__).read_text()
+        source = Path(bake_pkg.__file__).read_text()
         assert not re.search(r"^MIN_PER_RESOURCE_WINDOWS\s*=", source, re.MULTILINE)
 
     def test_bake_module_takes_its_setup_and_constants_from_the_package(self) -> None:
         # The script is a CLI over package code, not a second copy of it: the
-        # setup it shares with the rebake path lives in scry.eval.bake and the
-        # script calls it, so the two cannot drift; a second copy of the setup
-        # is how one path loses the missing-feature warning.
+        # setup and the bake it shares with the rebake path live in
+        # scry.eval.bake and the script calls them, so the two cannot drift; a
+        # second copy of the setup is how one path loses the missing-feature
+        # warning, and a second copy of the bake is how they stop agreeing on
+        # the number itself.
         assert bake_mod.prepare_bake is prepare_bake
-        assert bake_mod.RECON_METRIC is RECON_METRIC
-        assert bake_mod.OMITTED_FALLBACK is OMITTED_FALLBACK
+        assert bake_mod.compute_serving_block is bake_pkg.compute_serving_block
 
         source = Path(bake_mod.__file__).read_text()
         assert "prepare_bake(" in source  # called, not merely imported
+        assert not re.search(r"^def compute_serving_block", source, re.MULTILINE)
         # The script keeps no feature check of its own and no second wording
         # of the warning that check prints.
         assert "missing_features(" not in source
