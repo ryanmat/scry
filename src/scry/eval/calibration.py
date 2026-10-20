@@ -115,7 +115,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from scry.eval.bake import prepare_bake
+from scry.eval.bake import compute_serving_block, prepare_bake
 from scry.eval.rubric import SpecError
 
 if TYPE_CHECKING:
@@ -180,7 +180,7 @@ _ZIP_MAGIC = b"PK\x03\x04"
 """Leading bytes of a zip archive, and so of a torch checkpoint; a JSON seed is text."""
 
 DEFAULT_QUANTILE = 0.99
-"""Healthy-window quantile the bake takes, as ``scripts/bake_serving_threshold.py`` has it."""
+"""Healthy-window quantile the bake takes, as the bake's own CLI defaults it."""
 
 DEFAULT_MARGIN = 2.0
 """Per-resource margin on each resource's own healthy quantile; the sweep's selection."""
@@ -836,12 +836,12 @@ def _bake(
 ) -> tuple[dict[str, Any], Mapping[str, ResourceEligibility] | None, list[str]]:
     """Bake against the BASE model and take the serving block it would write.
 
-    The setup is ``prepare_bake``, the bake's own, and the arithmetic is
-    ``scripts/bake_serving_threshold.py``'s own rather than a second copy of
+    The setup and the arithmetic are ``scry.eval.bake``'s ``prepare_bake`` and
+    ``compute_serving_block``, the bake's own, rather than a second copy of
     either here to drift from them -- the reason the bake delegates its gates
     to ``scry.eval.hygiene`` instead of keeping its own, and the reason this
-    prints the same missing-feature warning the script does. The script's
-    CLI writes the block into a checkpoint; this takes the block itself, so a
+    prints the same missing-feature warning the bake's CLI does. That CLI
+    writes the block into a checkpoint; this takes the block itself, so a
     proposal can be guarded before anything at all is written. Returned
     beside it: the hygiene verdicts behind its ``per_resource`` map (omission
     provenance, requirement 4), and the warning lines printed by the setup
@@ -854,14 +854,6 @@ def _bake(
     scores, because the device the keeper carries is the one the scoring runs
     on.
     """
-    # The scripts directory is not a package: it is already importable when the
-    # rebake CLI runs beside it (and under the test suite), and is added from
-    # this checkout otherwise.
-    scripts = Path(__file__).resolve().parents[3] / "scripts"
-    if scripts.is_dir() and str(scripts) not in sys.path:
-        sys.path.append(str(scripts))
-    import bake_serving_threshold
-
     stderr = io.StringIO()
     try:
         with contextlib.redirect_stderr(stderr):
@@ -870,7 +862,7 @@ def _bake(
             keeper, df_long, step = prepare_bake(
                 model_path, calibration, profile=profile, device=device
             )
-            block, eligibility = bake_serving_threshold.compute_serving_block(
+            block, eligibility = compute_serving_block(
                 keeper,
                 df_long,
                 quantile=quantile,

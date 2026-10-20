@@ -373,8 +373,9 @@ class TestBakeDelegation:
 
     def test_the_rebake_takes_the_quantile_the_bake_takes(self) -> None:
         # calibration.DEFAULT_QUANTILE is written out rather than imported,
-        # since the bake is a script the package reaches only lazily; this
-        # pins the copy to bake()'s own default so the two cannot drift apart.
+        # since the default lives on the script's CLI and the package reaches
+        # the script not at all; this pins the copy to bake()'s own default so
+        # the two cannot drift apart.
         assert DEFAULT_QUANTILE == inspect.signature(bake_mod.bake).parameters["quantile"].default
 
     def test_bake_module_delegates_to_hygiene(self) -> None:
@@ -498,9 +499,9 @@ class TestTorchFreeImport:
         assert proc.returncode == 0, proc.stderr
 
     def test_bake_module_imports_without_torch(self) -> None:
-        # The bake's setup lives in the package so the image can reach it
-        # (`pip install .` copies src alone), and the package stays importable
-        # where torch is not: load_keeper is reached inside prepare_bake.
+        # The bake lives in the package so the image can reach it (`pip
+        # install .` copies src alone), and the package stays importable where
+        # torch is not: the torch-backed imports are inside the functions.
         proc = subprocess.run(
             [
                 sys.executable,
