@@ -63,7 +63,11 @@ staged -- in memory, with the base checkpoint byte-identical afterwards, since
 writing anything at all is the staging step's and the swap's business. Its
 setup is the bake's own (``scry.eval.bake.prepare_bake``), so a calibration
 capture that lacks a feature the checkpoint was trained on warns here exactly
-as it does under the script, and the warning rides the report.
+as it does under the script, and the warning rides the report. Its arithmetic
+is the bake's own too (``scry.eval.bake.compute_serving_block``), and that
+both come from the package rather than from ``scripts/`` is pinned as the
+layering it is: a run bakes from a tree holding a copy of ``src`` and no
+``scripts`` directory at all, which is what the serving image holds.
 
 ``build_rebake_report`` assembles what an operator reads afterwards, and is
 pinned on the two things a report of a rejection has to survive. It is strict
@@ -142,6 +146,7 @@ import math
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from dataclasses import fields
@@ -150,13 +155,14 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-import bake_serving_threshold as bake_mod
 import numpy as np
 import pytest
 import rebake_serving
 from rebake_serving import swap_checkpoint
 from synth import MISSING_FEATURE, PROFILE, gated_fleet_csv, missing_feature_csv
 
+from scry.eval import bake as bake_pkg
+from scry.eval import calibration as calibration_mod
 from scry.eval.calibration import (
     DEFAULT_MARGIN,
     DEFAULT_QUANTILE,
@@ -1593,7 +1599,7 @@ class TestCalibrationRun:
             }
             return block, {}
 
-        monkeypatch.setattr(bake_mod, "compute_serving_block", recording_bake)
+        monkeypatch.setattr(calibration_mod, "compute_serving_block", recording_bake)
         model = _base_checkpoint(keeper_path, tmp_path, {"node-a": BASE_GLOBAL}, age=timedelta(0))
         healthy = gated_fleet_csv(tmp_path)
 
@@ -1678,7 +1684,7 @@ class TestCalibrationRun:
             }
             return block, {}
 
-        monkeypatch.setattr(bake_mod, "compute_serving_block", recording_bake)
+        monkeypatch.setattr(calibration_mod, "compute_serving_block", recording_bake)
         model = _base_checkpoint(keeper_path, tmp_path, {"node-a": BASE_GLOBAL}, age=timedelta(0))
         healthy = gated_fleet_csv(tmp_path)
 
@@ -1751,6 +1757,102 @@ class TestCalibrationRun:
         # The held global keeps the fit it came from, not the discarded one's.
         assert {key: block[key] for key in BASE_PROVENANCE} == BASE_PROVENANCE
         assert json.loads(json.dumps(report, allow_nan=False)) == report
+
+
+RUN_FROM_A_COPY = """
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+package_root, model, calibration, profile, summary = sys.argv[1:]
+
+import scry.eval.calibration as calibration_mod
+
+# The copy is what ran: scry resolved from the checkout instead would leave
+# this a test of the tree the suite already runs in, scripts/ and all.
+assert Path(calibration_mod.__file__).is_relative_to(package_root), calibration_mod.__file__
+assert not any(Path(entry).name == "scripts" for entry in sys.path), sys.path
+assert importlib.util.find_spec("bake_serving_threshold") is None
+
+report, block = calibration_mod.run_calibration(model, calibration, profile=profile)
+
+assert "bake_serving_threshold" not in sys.modules  # nor did the run reach for it
+Path(summary).write_text(
+    json.dumps(
+        {
+            "global": report["global"]["verdict"],
+            "per_resource": {rid: row["verdict"] for rid, row in report["per_resource"].items()},
+            "threshold": block["threshold"],
+        }
+    )
+)
+"""
+"""A whole calibration run, from a tree whose only scry code is a copy of ``src``.
+
+Run by the test below in a subprocess, because an import path with no
+``scripts`` entry on it is a property of a process: this suite's own conftest
+puts the scripts directory on ``sys.path`` for every test in it, so in process
+there is no distinguishing a package that reaches the script from one that
+does not.
+"""
+
+
+class TestTheRunReachesTheBakeThroughThePackage:
+    def test_calibration_imports_the_bake_from_the_package_and_touches_no_path(self) -> None:
+        # The layering the three promotion steps exist for: `pip install .`
+        # copies src alone into the serving image, so a package module that
+        # reaches scripts/ runs in this checkout and nowhere else. The import
+        # is pinned as the object the module calls -- the package's own
+        # function, not a copy of it -- and both halves of the old reach are
+        # pinned out of the source, since the import was a lazy one inside
+        # _bake that no import of this module would have executed, and the
+        # sys.path append beside it is what made the script resolve at all.
+        assert calibration_mod.compute_serving_block is bake_pkg.compute_serving_block
+
+        source = Path(calibration_mod.__file__).read_text()
+        assert "bake_serving_threshold" not in source
+        assert "sys.path" not in source
+
+    def test_the_run_bakes_from_a_tree_that_has_no_scripts_directory(
+        self, keeper_path: str, tmp_path: Path
+    ) -> None:
+        # The image's layout, measured rather than argued from the imports: a
+        # copy of src with nothing beside it, on the import path of a process
+        # that carries no scripts entry, running a real bake of the gated
+        # fleet. The verdicts are the ones the in-process runs pin, so the run
+        # that reached the package for its bake reached the same arithmetic;
+        # the threshold is the proof that a bake happened at all rather than a
+        # run that returned early with everything kept.
+        package_root = tmp_path / "src"
+        shutil.copytree(REPO / "src", package_root, ignore=shutil.ignore_patterns("__pycache__"))
+        assert not (package_root.parent / "scripts").exists()  # nothing to reach, as in the image
+
+        model = _base_checkpoint(keeper_path, tmp_path, CLEAN_PER_RESOURCE)
+        summary = tmp_path / "summary.json"
+        proc = subprocess.run(
+            [
+                sys.executable, "-c", RUN_FROM_A_COPY,
+                str(package_root), model, gated_fleet_csv(tmp_path), PROFILE, str(summary),
+            ],
+            capture_output=True,
+            text=True,
+            # The config a run reads is found from the working directory, as it
+            # is for every other subprocess here; the import path is the one
+            # thing this case changes, and it is the copy and nothing else.
+            cwd=REPO,
+            env={**os.environ, "PYTHONPATH": str(package_root)},
+        )
+
+        assert proc.returncode == 0, proc.stderr
+        decided = json.loads(summary.read_text())
+        assert decided["global"] == "accepted"
+        assert decided["per_resource"] == {
+            "node-a": "accepted",
+            "node-b": "kept-gate-omitted:divergent-coverage:cpuUsageNanoCores",
+            "node-c": "kept-gate-omitted:insufficient-windows:12<50",
+        }
+        assert decided["threshold"] > 0.0  # a real bake behind the verdicts
 
 
 class TestSwapChain:

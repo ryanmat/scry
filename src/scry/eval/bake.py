@@ -1,7 +1,7 @@
-# Description: The serving bake's setup: the keeper, the healthy capture, and the window step.
-# Description: Torch-free to import; load_keeper is reached inside prepare_bake, as calibration is.
+# Description: The serving bake: its setup (keeper, capture, window step) and the block it derives.
+# Description: Torch-free to import; the torch-backed imports are inside the functions.
 
-"""What a serving-threshold bake needs before it can score anything.
+"""What a serving-threshold bake needs, and the block it derives.
 
 ``prepare_bake`` loads the keeper, resolves the feature profile from the
 checkpoint when the caller named none, fetches the whole healthy capture, and
@@ -13,15 +13,22 @@ a capture is not the one the model produces on complete data: that is a warning
 on stderr rather than an error, because the bake is still the best number
 available and the operator is the one who decides.
 
-It lives in the package and not in ``scripts/bake_serving_threshold.py``
-because two callers need it: the script's own ``bake``, and
+``compute_serving_block`` is the arithmetic over that setup: it windows the
+capture, scores it against the keeper, and derives the block a checkpoint
+serves -- the global threshold at a healthy quantile with a held-out half for
+the false-positive rate, and, where a margin is given, a per-resource
+threshold for every resource the hygiene gates leave it to propose for.
+
+Both live in the package and not in ``scripts/bake_serving_threshold.py``
+because two callers need them: the script's own ``bake``, and
 ``scry.eval.calibration``'s rebake, which cannot import the script in the
-serving image (``pip install .`` copies ``src`` alone). One setup for both
-callers is what puts the missing-feature warning on both paths.
+serving image (``pip install .`` copies ``src`` alone). One setup and one
+arithmetic for both callers is what puts the missing-feature warning on both
+paths and keeps the two from reaching different numbers from the same inputs.
 
 Importable without torch, like the rest of the torch-free half of this package:
-``load_keeper`` is imported inside the function, so a consumer that only wants
-the constants pays for no model stack.
+the torch-backed imports are inside the functions, so a consumer that imports
+this module for its constants pays for no model stack.
 """
 
 from __future__ import annotations

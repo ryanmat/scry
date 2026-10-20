@@ -12,10 +12,14 @@ false-positive rate), and writes a ``serving`` block into the checkpoint:
 serving API reads this block to turn a per-window reconstruction error into an
 alertable ratio.
 
-The setup every bake starts with -- the keeper, the capture, and the window
-step, with a warning when the capture lacks a trained feature -- is
-``scry.eval.bake.prepare_bake``, shared with the rebake path so the two
-cannot bake from differently assembled inputs.
+The bake itself is the package's. The setup every bake starts with -- the
+keeper, the capture, and the window step, with a warning when the capture
+lacks a trained feature -- is ``scry.eval.bake.prepare_bake``, and the
+arithmetic that derives the block from it is
+``scry.eval.bake.compute_serving_block``; both are shared with the rebake
+path, so the two cannot bake from differently assembled inputs or reach
+different numbers from the same ones. What this script owns is the CLI and
+the write into the checkpoint.
 
 The holdout is from THRESHOLD FITTING only. When the healthy capture is also the
 data the model trained on, ``healthy_fpr`` is in-sample for the model and will
@@ -61,7 +65,8 @@ def bake(
         data_format: Optional explicit file format override.
         output: Where to write the updated checkpoint; defaults to in place.
         per_resource_margin: When set, also bake per-resource thresholds of
-            ``margin x own_quantile`` (see :func:`compute_serving_block`).
+            ``margin x own_quantile`` (see
+            :func:`scry.eval.bake.compute_serving_block`).
 
     Returns:
         The serving block that was written.
