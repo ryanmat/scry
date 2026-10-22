@@ -136,6 +136,24 @@ out. ``--keep-global`` holds the previous global in force whatever the band
 decided about the fresh one, with that global's own fit carried on the block as
 a band rejection leaves it. Neither is a refusal, so neither moves the exit
 code, and both are recorded on the report under their own names.
+
+The third exit code a stage-and-report run can earn is row 2, and it is the row
+that says the run never baked: a spec or config error, measured on the two the
+spec names. A first bake with no seed is the 2026-07-28 failure itself -- an
+empty serving per-resource map, every proposal accepted as new, exit 0 -- and
+is pinned as exit 2 with the error text naming ``--seed``, nothing staged and
+no report written, because the file an operator reads and the file a later
+``--apply`` promotes must not exist for a run that decided nothing. A
+calibration capture that is not there is the other, and the checkpoint in force
+is pinned untouched by it.
+
+``--allow-drift`` is the last of the operator's inputs, and the one the band
+answers to: the values it refused are kept at the fresh proposal instead,
+stamped ``accepted-allow-drift`` so the report says the band was bypassed
+rather than satisfied, which leaves the same bake that exits 1 without the flag
+exiting 0 with it. What it does not bypass is the seed: the vacuous first bake
+is pinned under the flag as well, since the resolution it would have to reach
+sits upstream of the band.
 """
 
 from __future__ import annotations
@@ -2105,6 +2123,111 @@ def policy_rebake_run(
     return {"proc": proc, "model": model, "report": report}
 
 
+@pytest.fixture(scope="module", params=[[], ["--allow-drift"]], ids=["plain", "allow-drift"])
+def unseeded_rebake_run(
+    request: pytest.FixtureRequest, keeper_path: str, tmp_path_factory: pytest.TempPathFactory
+) -> dict[str, Any]:
+    """The measured vacuous first bake through the CLI, run plainly and with --allow-drift.
+
+    The serving block carries a usable global and an empty per-resource map, so
+    node-a -- the one resource of the gated fleet the hygiene gates leave the
+    bake to propose for -- has no previous value for the band to measure
+    against, and the CLI passes no seed. That is the 2026-07-28 run requirement
+    1 exists for.
+
+    Run twice over the same inputs because ``--allow-drift`` bypasses the band
+    while the seed resolves upstream of it: a flag that reached the resolution
+    would turn this run back into the unguarded first bake under another name.
+    Module-scoped for the reason the runs above are -- each invocation is a
+    whole bake -- and parametrized rather than duplicated because the two
+    differ in the flag and in nothing else.
+    """
+    tmp = tmp_path_factory.mktemp("rebake_cli_unseeded")
+    model = _base_checkpoint(keeper_path, tmp, {})
+    report = tmp / "rebake.json"
+    proc = subprocess.run(
+        [
+            sys.executable, str(REBAKE_SCRIPT),
+            "--model", model,
+            "--calibration", gated_fleet_csv(tmp),
+            "--report", str(report),
+            *request.param,
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO,
+    )
+    return {"proc": proc, "model": model, "report": report}
+
+
+@pytest.fixture(scope="module")
+def absent_capture_rebake_run(
+    keeper_path: str, tmp_path_factory: pytest.TempPathFactory
+) -> dict[str, Any]:
+    """A run naming a calibration capture that is not there: the config half of exit 2.
+
+    The path is inside the run's own directory and is never written, so what
+    the run meets is an absent capture rather than an unreadable one, and the
+    bake stops at the fetch. The checkpoint in force is snapshotted ahead of
+    the subprocess for the reason the clean run's is: read afterwards it would
+    equal itself however the run had rewritten it.
+    """
+    tmp = tmp_path_factory.mktemp("rebake_cli_absent_capture")
+    model = _base_checkpoint(keeper_path, tmp, CLEAN_PER_RESOURCE)
+    absent = tmp / "healthy_week.csv"
+    report = tmp / "rebake.json"
+    before = {"served": _digest(model), "mtime": os.stat(model).st_mtime}
+    proc = subprocess.run(
+        [
+            sys.executable, str(REBAKE_SCRIPT),
+            "--model", model,
+            "--calibration", str(absent),
+            "--report", str(report),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO,
+    )
+    return {"proc": proc, "model": model, "calibration": absent, "report": report, **before}
+
+
+@pytest.fixture(scope="module")
+def drifted_rebake_run(
+    keeper_path: str, tmp_path_factory: pytest.TempPathFactory
+) -> dict[str, Any]:
+    """The refused bake run again under --allow-drift: the same inputs, the band bypassed.
+
+    The inputs are ``refused_rebake_run``'s exactly -- a serving block stamped
+    at the moment of the run, so its age floors at one day and the band is
+    about six percent either way, serving ``TINY_THRESHOLD`` everywhere -- so
+    the two runs differ in the flag and in nothing else, and the difference
+    between their reports is what the flag did. Module-scoped and a real
+    subprocess for the reason the runs above are.
+    """
+    tmp = tmp_path_factory.mktemp("rebake_cli_drift")
+    model = _base_checkpoint(
+        keeper_path,
+        tmp,
+        {"node-a": TINY_THRESHOLD},
+        threshold=TINY_THRESHOLD,
+        age=timedelta(0),
+    )
+    report = tmp / "rebake.json"
+    proc = subprocess.run(
+        [
+            sys.executable, str(REBAKE_SCRIPT),
+            "--model", model,
+            "--calibration", gated_fleet_csv(tmp),
+            "--report", str(report),
+            "--allow-drift",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO,
+    )
+    return {"proc": proc, "model": model, "report": report}
+
+
 class TestRebakeServingCLI:
     def test_a_bake_with_nothing_refused_writes_the_report_and_exits_0(
         self, rebake_run: dict[str, Any]
@@ -2281,6 +2404,7 @@ class TestRebakeServingCLI:
             "stage": True,
             "exclude": [],  # no hold is the empty policy, not an absent keyword
             "keep_global": False,
+            "allow_drift": False,  # the band is on unless the operator says otherwise
             **expected,
         }
         assert json.loads(report_path.read_text())["staged_path"] == "serving.staged.pt"
@@ -2309,6 +2433,89 @@ class TestRebakeServingCLI:
         serving = _checkpoint(Path(report["staged_path"]))["serving"]
         assert serving["threshold"] == BASE_GLOBAL == report["global"]["kept"]
         assert serving["per_resource"] == {"node-c": 0.22}  # the two held are out of the map
+
+    def test_a_first_bake_with_no_seed_is_a_spec_error_whatever_the_flags(
+        self, unseeded_rebake_run: dict[str, Any]
+    ) -> None:
+        # Exit-code row 2 of requirement 5, and the acceptance pin of
+        # requirement 1: an empty serving per-resource map with no seed is a
+        # spec error rather than a first bake that accepts whatever the capture
+        # scored -- the measured 2026-07-28 run, where all eight resources were
+        # accepted-new and the process exited 0. The message is what an
+        # operator acts on, so it is pinned to name both the flag that would
+        # fix the run and the value it wanted, and it goes to stderr, where a
+        # failure belongs. What the run left is pinned by the directory
+        # listing: no report to read and nothing staged for a later --apply to
+        # promote, because a run that decided nothing must leave neither.
+        # --allow-drift is parametrized in rather than given its own case: it
+        # bypasses the band, the seed resolves upstream of the band, and a run
+        # that let the flag reach the resolution would be the unguarded first
+        # bake again.
+        proc = unseeded_rebake_run["proc"]
+        model = Path(unseeded_rebake_run["model"])
+
+        assert proc.returncode == 2, proc.stderr
+        assert "--seed" in proc.stderr
+        assert "node-a" in proc.stderr
+        assert sorted(path.name for path in model.parent.iterdir()) == [
+            "gated_fleet.csv",
+            "serving.pt",
+        ]
+
+    def test_a_calibration_capture_that_is_not_there_is_a_spec_error(
+        self, absent_capture_rebake_run: dict[str, Any]
+    ) -> None:
+        # The other spec/config error requirement 5 gives exit 2: a run that
+        # never baked at all. Its exit code is the half an operator's cron
+        # reads -- an uncaught error would exit 1, which the table reserves for
+        # a run that completed holding thresholds back -- and the capture it
+        # could not read is named on stderr rather than buried in a traceback.
+        # The checkpoint in force is pinned by its bytes and its mtime (the
+        # next run's age anchor falls back to it), and the directory listing
+        # pins that a failed run leaves no report and nothing staged.
+        proc = absent_capture_rebake_run["proc"]
+        model = Path(absent_capture_rebake_run["model"])
+
+        assert proc.returncode == 2, proc.stderr
+        assert str(absent_capture_rebake_run["calibration"]) in proc.stderr
+        assert _digest(model) == absent_capture_rebake_run["served"]
+        assert os.stat(model).st_mtime == absent_capture_rebake_run["mtime"]
+        assert sorted(path.name for path in model.parent.iterdir()) == ["serving.pt"]
+
+    def test_allow_drift_keeps_what_the_band_refused_and_stamps_it(
+        self, drifted_rebake_run: dict[str, Any], refused_rebake_run: dict[str, Any]
+    ) -> None:
+        # --allow-drift over the bake refused_rebake_run measures, which is the
+        # control: the same keeper, the same capture, the same serving block,
+        # so the proposals are the same numbers and the flag is the only
+        # difference between the two reports. What it does is keep the values
+        # the band held back, stamped accepted-allow-drift so the report says
+        # the band was bypassed rather than satisfied; nothing is refused any
+        # more, so the run is exit-code row 0 where the control is row 1, and
+        # what a later --apply would promote carries the drifted global rather
+        # than the previous one.
+        proc = drifted_rebake_run["proc"]
+        report = json.loads(drifted_rebake_run["report"].read_text())
+        control = json.loads(refused_rebake_run["report"].read_text())
+
+        assert proc.returncode == 0, proc.stderr
+        assert report["allow_drift"] is True
+        assert report["rejected_count"] == 0
+        assert report["global"]["verdict"] == "accepted-allow-drift"
+        assert report["per_resource"]["node-a"]["verdict"] == "accepted-allow-drift"
+
+        assert report["global"]["old"] == TINY_THRESHOLD  # the band had a value to refuse
+        assert report["global"]["kept"] == report["global"]["proposed"] > TINY_THRESHOLD
+        node_a = report["per_resource"]["node-a"]
+        assert node_a["kept"] == node_a["proposed"] > TINY_THRESHOLD
+        assert _checkpoint(Path(report["staged_path"]))["serving"]["threshold"] == (
+            report["global"]["proposed"]
+        )
+
+        # The control, bake for bake: the same proposal, refused and held.
+        assert control["global"]["proposed"] == report["global"]["proposed"]
+        assert control["global"]["verdict"] == "REJECTED-grew"
+        assert control["global"]["kept"] == TINY_THRESHOLD
 
 
 class TestPackageExports:
