@@ -25,6 +25,21 @@ A refusal is not a failure, so both runs leave the same two things, a report to
 read and a staged copy to promote; neither hold is a refusal either, so neither
 moves the exit code.
 
+``--allow-drift`` is the operator's answer to the band itself: what it refused
+is staged at the freshly baked value instead, stamped ``accepted-allow-drift``
+on its row, so the run that would have exited 1 holding those thresholds back
+exits 0 having moved them. It never reaches the seed requirement, which
+resolves upstream of the band -- a first bake with no previous thresholds and
+no seed is refused under the flag exactly as it is without it.
+
+That refusal is the exit code which is not the band's. 2 is a run that never
+baked (requirement 5): a spec or config error, the missing seed above or a
+calibration capture that cannot be read, and what distinguishes it from 1 for
+an operator's cron is that nothing was decided -- no report to read and
+nothing staged, where a 1 leaves both. The error is written to stderr naming
+what failed, rather than escaping as a traceback and taking Python's own exit
+1 with it, which is the code the table gives to a run that completed.
+
 ``swap_checkpoint`` is the chain ``--apply`` runs, and it is a function rather
 than a stretch of an argparse body so that it can be driven by a test: the live
 checkpoint, the staged copy, the restart command, and the health check are all
@@ -68,15 +83,41 @@ import json
 import shlex
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import duckdb
 
 from scry.eval.calibration import DEFAULT_MARGIN, DEFAULT_QUANTILE, run_calibration
 from scry.eval.rubric import SpecError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+_CONFIG_ERRORS: tuple[type[Exception], ...] = (OSError, ValueError, duckdb.Error)
+"""What a run that never baked raises, and so what the CLI exits 2 on.
+
+Requirement 5 gives code 2 to a spec or config error, which is every way the
+operator's inputs can stop the run before it has decided anything.
+``OSError`` is a checkpoint that is not there or cannot be read.
+``ValueError`` is an input the bake cannot work with -- a capture with no
+readable time range, one that yields no windows, a margin that is not a
+positive finite number -- and it is also how the package's own refusal
+arrives, since ``SpecError`` is a ``ValueError``: a first bake whose
+thresholds neither the serving block nor a seed supplies, an ``--exclude``
+naming a resource this rebake decided nothing about. Listing both would be
+listing the same type twice, so the test that drives a seedless first bake
+through this CLI is what holds that mapping down. ``duckdb.Error`` is the
+capture itself, absent or unreadable where it is: fetching it is a query, and
+the data layer raises its reader's error rather than wrapping it, so the CLI
+names the reader to keep a mistyped path out of the exit code the band owns.
+
+Argparse exits 2 on its own usage errors, so a flag that does not exist and a
+flag naming a file that does not exist read alike to the cron that runs this:
+nothing was baked.
+"""
 
 DEFAULT_HEALTH_CHECK = "curl -fsS http://localhost:8000/health"
 """What ``--apply`` asks the restarted service, unless the operator names something else.
@@ -218,7 +259,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     ``--exclude`` and ``--keep-global`` are of a different kind: standing policy
     on the serving host, applied after the band rather than weighed by it, and
-    so they default to holding nothing and keeping nothing.
+    so they default to holding nothing and keeping nothing. ``--allow-drift``
+    is a third kind again -- neither an input to the bake nor a hold over its
+    result, but the band's own override -- and defaults to off, because the
+    band is what this script exists to run.
     """
     parser = argparse.ArgumentParser(
         description=(
@@ -283,6 +327,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--allow-drift",
+        action="store_true",
+        help=(
+            "Stage the freshly baked value where the band refused it, stamped "
+            "accepted-allow-drift. The seed requirement is upstream of the band "
+            "and is not bypassed."
+        ),
+    )
+    parser.add_argument(
         "--health-check-command",
         type=shlex.split,
         default=shlex.split(DEFAULT_HEALTH_CHECK),
@@ -308,19 +361,30 @@ def main(argv: list[str] | None = None) -> int:
         a failure of the run: it stages and reports like any other run, and
         what the 1 says is that some of what is staged is the previous
         threshold rather than a fresh one -- the report's rows name which, and
-        why.
+        why. ``2`` is row 2, a run that never baked: one of
+        ``_CONFIG_ERRORS``, reported on stderr, with no report written and
+        nothing staged, since a run that decided nothing must leave nothing to
+        read and nothing to promote.
     """
     args = parse_args(argv)
-    report, _ = run_calibration(
-        args.model,
-        args.calibration,
-        quantile=args.quantile,
-        margin=args.margin,
-        device=args.device,
-        exclude=args.exclude,
-        keep_global=args.keep_global,
-        stage=True,
-    )
+    try:
+        report, _ = run_calibration(
+            args.model,
+            args.calibration,
+            quantile=args.quantile,
+            margin=args.margin,
+            device=args.device,
+            allow_drift=args.allow_drift,
+            exclude=args.exclude,
+            keep_global=args.keep_global,
+            stage=True,
+        )
+    except _CONFIG_ERRORS as exc:
+        # The table's own name for code 2, since the half of it that is a
+        # config error -- a capture that is not there -- would send an
+        # operator reading "spec error" to the wrong input.
+        print(f"spec/config error: {exc}", file=sys.stderr)
+        return 2
     Path(args.report).write_text(json.dumps(report, indent=2) + "\n")
     print(
         f"rebaked {args.model} against {args.calibration}: "
