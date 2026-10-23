@@ -154,6 +154,22 @@ rather than satisfied, which leaves the same bake that exits 1 without the flag
 exiting 0 with it. What it does not bypass is the seed: the vacuous first bake
 is pinned under the flag as well, since the resolution it would have to reach
 sits upstream of the band.
+
+``--apply`` is the run that promotes what every run above only stages, and it
+is pinned through the whole chain against a health check that refuses: the
+copy the restart command leaves is how a test outside the process sees that
+the staged checkpoint was in force when the service was restarted onto it, and
+what the refused run leaves afterwards is the checkpoint that was in force,
+down to the mtime the next run's age anchor falls back to, the staged copy to
+promote again, and the report of what the bake decided, stamped ``dry_run``
+false. The bake under that run refuses nothing, so the 3 the process exits
+with is the swap's own code and nothing the band did -- which is the last row
+of requirement 5. The rest of the row is pinned over a replaced chain, because
+the files a swap moves are ``TestSwapChain``'s measurement rather than the
+CLI's: the codes a completed run earns are the same with the flag and without
+it, and 3 outranks them when the swap is undone. A command vector the chain
+could not exec is refused by the parser instead, since ``subprocess`` reads
+``argv[0]`` to run one and would raise after the promote.
 """
 
 from __future__ import annotations
@@ -2228,6 +2244,53 @@ def drifted_rebake_run(
     return {"proc": proc, "model": model, "report": report}
 
 
+@pytest.fixture(scope="module")
+def applied_rebake_run(
+    keeper_path: str, tmp_path_factory: pytest.TempPathFactory
+) -> dict[str, Any]:
+    """The clean bake run again under --apply, against a health check that refuses.
+
+    The inputs are ``rebake_run``'s -- a serving block the band has nothing to
+    refuse against -- so the only thing that can move this run's exit code off
+    0 is the swap, and the code it does exit with is a measurement of the swap
+    rather than of the bake. The restart command copies whatever is in force at
+    the moment it runs, so the copy it leaves is how a test outside the process
+    sees that the promote happened before the health check undid it.
+    Module-scoped and a real subprocess for the reason the runs above are: the
+    invocation is a whole bake, and an exit code is a property of one process.
+    """
+    tmp = tmp_path_factory.mktemp("rebake_cli_apply")
+    model = _base_checkpoint(keeper_path, tmp, CLEAN_PER_RESOURCE)
+    report = tmp / "rebake.json"
+    witness = tmp / "restarted-with.pt"
+    before = {"served": _digest(model), "mtime": os.stat(model).st_mtime}
+    proc = subprocess.run(
+        [
+            sys.executable, str(REBAKE_SCRIPT),
+            "--model", model,
+            "--calibration", gated_fleet_csv(tmp),
+            "--report", str(report),
+            "--apply",
+            "--restart-command", shlex.join(_copy_command(model, witness)),
+            "--health-check-command", shlex.join(FAILS),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO,
+    )
+    return {"proc": proc, "model": model, "report": report, "witness": witness, **before}
+
+
+APPLY = ["--apply", "--restart-command", "systemctl restart scry-serving"]
+"""The two flags a promoting run carries: the chain, and the command it restarts with."""
+
+SWAPPED = rebake_serving.SwapOutcome(rebake_serving.OUTCOME_SWAPPED, "health check passed")
+ROLLED_BACK = rebake_serving.SwapOutcome(
+    rebake_serving.OUTCOME_ROLLED_BACK, f"health check {' '.join(FAILS)} exited 1"
+)
+"""The two outcomes the chain returns, as the CLI's own mapping rows read them."""
+
+
 class TestRebakeServingCLI:
     def test_a_bake_with_nothing_refused_writes_the_report_and_exits_0(
         self, rebake_run: dict[str, Any]
@@ -2405,6 +2468,7 @@ class TestRebakeServingCLI:
             "exclude": [],  # no hold is the empty policy, not an absent keyword
             "keep_global": False,
             "allow_drift": False,  # the band is on unless the operator says otherwise
+            "dry_run": True,  # neither row applies, so neither will swap
             **expected,
         }
         assert json.loads(report_path.read_text())["staged_path"] == "serving.staged.pt"
@@ -2516,6 +2580,147 @@ class TestRebakeServingCLI:
         assert control["global"]["proposed"] == report["global"]["proposed"]
         assert control["global"]["verdict"] == "REJECTED-grew"
         assert control["global"]["kept"] == TINY_THRESHOLD
+
+    def test_apply_promotes_the_staged_copy_and_a_refused_health_check_exits_3(
+        self, applied_rebake_run: dict[str, Any]
+    ) -> None:
+        # Exit-code row 3 of requirement 5, end to end: a post-swap health
+        # failure, after the chain rolled the swap back on its own. The bake
+        # underneath is the clean one, which refuses nothing, so a run that had
+        # not swapped at all would exit 0 -- the 3 is the swap's code and
+        # nothing the band decided. That the swap really happened is the
+        # witness the restart left: it holds the staged bytes rather than the
+        # served ones, so the promote was in force when the service was
+        # restarted onto it. What the operator is left with is what was in
+        # force before, down to the mtime the next run's age anchor falls back
+        # to, the staged copy to promote again once the service is fixed, no
+        # backup, and the report of what the bake decided -- written before the
+        # swap and stamped dry_run false, because this run did attempt one.
+        proc = applied_rebake_run["proc"]
+        model = Path(applied_rebake_run["model"])
+        staged = model.with_name("serving.staged.pt")
+
+        assert proc.returncode == 3, proc.stderr
+        assert _digest(staged) != applied_rebake_run["served"]  # the bake proposed a change
+        assert _digest(applied_rebake_run["witness"]) == _digest(staged)  # promoted, then restarted
+        assert _digest(model) == applied_rebake_run["served"]  # and rolled back to what served
+        assert os.stat(model).st_mtime == applied_rebake_run["mtime"]
+        # The command that refused is what an operator acts on, named on stderr.
+        assert f"health check command {' '.join(FAILS)} exited 1" in proc.stderr
+        assert sorted(path.name for path in model.parent.iterdir()) == [
+            "gated_fleet.csv",
+            "rebake.json",
+            "restarted-with.pt",
+            "serving.pt",
+            "serving.staged.pt",
+        ]
+
+        report = json.loads(applied_rebake_run["report"].read_text())
+        assert report["dry_run"] is False  # a swap was attempted, and the report field says so
+        assert report["rejected_count"] == 0  # the band refused nothing: the 3 is the swap's
+
+    @pytest.mark.parametrize(
+        ("flags", "rejected", "swap_result", "expected"),
+        [
+            pytest.param([], 0, None, 0, id="staged-clean"),
+            pytest.param([], 1, None, 1, id="staged-refused"),
+            pytest.param(APPLY, 0, SWAPPED, 0, id="applied-clean"),
+            pytest.param(APPLY, 1, SWAPPED, 1, id="applied-refused"),
+            pytest.param(APPLY, 0, ROLLED_BACK, 3, id="applied-rolled-back"),
+            pytest.param(APPLY, 1, ROLLED_BACK, 3, id="applied-rolled-back-refused"),
+        ],
+    )
+    def test_the_swap_decides_the_exit_code_only_when_it_is_asked_for(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        flags: list[str],
+        rejected: int,
+        swap_result: object,
+        expected: int,
+    ) -> None:
+        # The rest of requirement 5's exit-code mapping, where the subprocess
+        # row above cannot reach it: what --apply does to a code the band
+        # already decided. The band's codes survive the flag -- a swapped run
+        # exits 0 having refused nothing and 1 holding something back, exactly
+        # as the staged runs do -- and a rolled-back swap is 3, which outranks
+        # the band's 1 because it is the half of the run an operator has to
+        # act on. The run is replaced rather than baked for the reason the
+        # parameters row above replaces it, and the chain is replaced because
+        # the files it moves are TestSwapChain's measurement: what is measured
+        # here is which of the two is called, with what, and what the process
+        # exits with. dry_run rides along -- the report field that says whether
+        # a swap was attempted, which is all it is (requirement 5) -- and the
+        # report is written before the swap either way, so even the exit 3
+        # leaves the record of what was decided.
+        seen: dict[str, Any] = {}
+        swapped_with: dict[str, Any] = {}
+        staged = str(tmp_path / "serving.staged.pt")
+        report_path = tmp_path / "rebake.json"
+
+        def recording_run(model_path, calibration, **kwargs):
+            seen.update(kwargs)
+            return {"staged_path": staged, "rejected_count": rejected}, {}
+
+        def recording_swap(live, staged_path, **kwargs):
+            swapped_with.update(live=live, staged=staged_path, **kwargs)
+            return swap_result
+
+        monkeypatch.setattr(rebake_serving, "run_calibration", recording_run)
+        monkeypatch.setattr(rebake_serving, "swap_checkpoint", recording_swap)
+
+        code = rebake_serving.main(
+            ["--model", "serving.pt", "--calibration", "healthy.csv",
+             "--report", str(report_path), *flags]
+        )
+
+        applying = bool(flags)
+        assert code == expected
+        assert seen["dry_run"] is not applying  # the report field, and the only thing it is
+        assert seen["stage"] is True  # a run that will swap stages the same file first
+        assert swapped_with == (
+            {
+                "live": "serving.pt",
+                "staged": staged,  # what the run staged, as the report names it
+                "restart_command": ["systemctl", "restart", "scry-serving"],
+                "health_check_command": shlex.split(rebake_serving.DEFAULT_HEALTH_CHECK),
+            }
+            if applying
+            else {}  # without --apply nothing is promoted: stage, report, and stop
+        )
+        assert json.loads(report_path.read_text())["rejected_count"] == rejected
+
+    @pytest.mark.parametrize(
+        "flags",
+        [
+            pytest.param(["--apply"], id="no-restart-command"),
+            pytest.param(["--apply", "--restart-command", ""], id="empty-restart-command"),
+            pytest.param([*APPLY, "--health-check-command", " "], id="blank-health-check"),
+        ],
+    )
+    def test_apply_without_a_command_the_chain_can_run_is_a_usage_error(
+        self, capsys: pytest.CaptureFixture[str], flags: list[str]
+    ) -> None:
+        # The chain runs both vectors through subprocess, which reads argv[0]
+        # to exec them, so a vector with nothing in it -- which is what
+        # shlex.split makes of an empty or blank string -- raises IndexError
+        # rather than refusing as a command that failed, and raises it after
+        # the promote, in the half-swapped state the chain's ordering exists to
+        # prevent. An --apply with no restart command at all is the same hole
+        # by another route, since promoting a checkpoint the service was never
+        # restarted onto leaves it serving the previous one. The parser is
+        # where both are caught, before anything is baked, and a usage error is
+        # what argparse exits 2 on -- the code the table gives a run that never
+        # baked, which this is.
+        with pytest.raises(SystemExit) as refused:
+            rebake_serving.parse_args(
+                ["--model", "m.pt", "--calibration", "c.csv", "--report", "r.json", *flags]
+            )
+
+        assert refused.value.code == 2
+        assert "--apply needs a --restart-command and a --health-check-command" in (
+            capsys.readouterr().err
+        )
 
 
 class TestPackageExports:

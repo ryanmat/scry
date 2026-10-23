@@ -67,6 +67,25 @@ executed at all counts as that link refusing, because it refuses after the
 promote and an exception out of the chain there would leave the staged
 checkpoint in force with no outcome to act on.
 
+``--apply`` is what asks for all of that, and it takes the restart command
+with it: no service name is the code's to assume, so a promote with nothing to
+restart the service onto the new checkpoint with is a usage error rather than
+a half-done swap. So is either command arriving empty, which is what
+``shlex.split`` makes of a blank string and what ``subprocess`` raises
+``IndexError`` on rather than refusing, after the promote.
+
+What such a run exits with is the band's own code when the swap held -- 0 or
+1, the two a stage-and-report run earns, since promoting what was staged does
+not change what was decided -- and 3 when it did not: a swap or post-swap
+health failure after the automatic rollback (requirement 5). The 3 outranks a
+1, because thresholds held back are a report to read while a rolled-back swap
+is a service to look at. On disk that rollback is complete, but the service
+was restarted around the swap and the health check is what refused it, so what
+the 3 says on stderr is that the process may still hold the checkpoint the
+rollback has taken off disk. Which kind of run wrote a report is the report's
+``dry_run`` field, where requirement 5 puts it, and not an exit code of its
+own.
+
 Guard, bake, and report logic stays in ``scry.eval.calibration``, pure and
 tested there. This module is the one that holds the operator's inputs, moves
 files, and runs commands.
@@ -253,9 +272,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     The bake's own inputs -- the margin, the quantile, and the device it scores
     on -- are the operator's here rather than constants welded into a module,
-    and so is the health check a later ``--apply`` runs (requirement 6). Each
-    defaults to what the code already does, so a run that names none of them is
-    the run this CLI made before they existed.
+    and so is the health check ``--apply`` runs (requirement 6). Each defaults
+    to what the code already does, so a run that names none of them is the run
+    this CLI made before they existed. The restart command is the one input
+    with no default to fall back on, since the service to restart is the
+    operator's and not this code's to guess, so ``--apply`` requires it.
 
     ``--exclude`` and ``--keep-global`` are of a different kind: standing policy
     on the serving host, applied after the band rather than weighed by it, and
@@ -336,23 +357,49 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--health-check-command",
-        type=shlex.split,
-        default=shlex.split(DEFAULT_HEALTH_CHECK),
+        "--apply",
+        action="store_true",
         help=(
-            "Command a later --apply asks whether the restarted service is serving "
-            f"(default: {DEFAULT_HEALTH_CHECK})."
+            "Promote the staged checkpoint once it is written: back up, promote, "
+            "restart, health-check, and roll back if either command refuses. "
+            "Requires --restart-command."
         ),
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--restart-command",
+        type=shlex.split,
+        help=(
+            "Command --apply restarts the service onto the promoted checkpoint with. "
+            "Required with --apply, since no service name is this code's to assume."
+        ),
+    )
+    parser.add_argument(
+        "--health-check-command",
+        type=shlex.split,
+        default=DEFAULT_HEALTH_CHECK,
+        help=(
+            "Command --apply asks whether the restarted service is serving "
+            "(default: %(default)s)."
+        ),
+    )
+    args = parser.parse_args(argv)
+    if args.apply and not (args.restart_command and args.health_check_command):
+        parser.error(
+            "--apply needs a --restart-command and a --health-check-command it can run: "
+            "an unrestarted service is not serving the checkpoint that was promoted, and "
+            "a vector shlex.split left empty is not a command at all"
+        )
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Stage a guarded rebake beside the checkpoint in force and report what it decided.
+    """Stage a guarded rebake beside the checkpoint in force, report it, and promote on request.
 
-    The staged copy is written but never promoted: what an operator is left
-    with is a report to read and a file a later ``--apply`` can put in force,
-    which is the separation spec section 10, requirement 6 asks for.
+    Without ``--apply`` the staged copy is written and never promoted: what an
+    operator is left with is a report to read and a file a later run can put in
+    force, which is the separation spec section 10, requirement 6 asks for.
+    With it, that later run is this one -- the same bake, staged and reported
+    before any of it is promoted, and then put in force by the chain above.
 
     Returns:
         ``0`` when the run completed with nothing refused, ``1`` when it
@@ -364,7 +411,10 @@ def main(argv: list[str] | None = None) -> int:
         why. ``2`` is row 2, a run that never baked: one of
         ``_CONFIG_ERRORS``, reported on stderr, with no report written and
         nothing staged, since a run that decided nothing must leave nothing to
-        read and nothing to promote.
+        read and nothing to promote. ``3`` is row 3 and only an ``--apply``
+        run can earn it: the swap was rolled back, which outranks the band's 1
+        because the report says what the band held while only stderr says what
+        the service is left serving.
     """
     args = parse_args(argv)
     try:
@@ -377,6 +427,7 @@ def main(argv: list[str] | None = None) -> int:
             allow_drift=args.allow_drift,
             exclude=args.exclude,
             keep_global=args.keep_global,
+            dry_run=not args.apply,
             stage=True,
         )
     except _CONFIG_ERRORS as exc:
@@ -393,6 +444,23 @@ def main(argv: list[str] | None = None) -> int:
     rejected = report["rejected_count"]
     if rejected:
         print(f"refused {rejected} proposal(s): the previous thresholds stay in the staged block")
+    staged = report["staged_path"]
+    if args.apply:
+        swap = swap_checkpoint(
+            args.model,
+            staged,
+            restart_command=args.restart_command,
+            health_check_command=args.health_check_command,
+        )
+        if swap.outcome == OUTCOME_ROLLED_BACK:
+            print(
+                f"rolled back: {swap.reason}. {args.model} is the checkpoint that was "
+                f"in force and {staged} is beside it to promote again, but the service "
+                "was restarted around the swap: check what it is serving.",
+                file=sys.stderr,
+            )
+            return 3
+        print(f"swapped {staged} into {args.model}: {swap.reason}")
     return 1 if rejected else 0
 
 
