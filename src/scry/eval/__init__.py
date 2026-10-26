@@ -52,6 +52,7 @@ from scry.eval.rubric import (
     load_rubric,
 )
 from scry.eval.sweep import compute_baselines, run_sweep
+from scry.eval.vus import score_vus_pr
 
 # name -> source module, resolved on first access by __getattr__ below.
 _LAZY_EXPORTS: dict[str, str] = {
@@ -138,6 +139,7 @@ __all__ = [
     "per_resource_time_split",
     "run_suite",
     "run_sweep",
+    "score_vus_pr",
     "select_detection",
     "slice_stats",
     "warn_missing_model_features",
