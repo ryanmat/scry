@@ -87,6 +87,14 @@ Provenance is what makes a number defensible later: the model path and its hash,
 
 The report is validated against its schema before it is returned, so a report that exists is a report that conforms.
 
+## VUS-PR and its backend
+
+`vus_pr` is a reported field, never a gate: volume under the precision-recall surface over a range of temporal tolerances, which keeps a number here comparable to the time-series anomaly-detection literature without adopting single-best-threshold scoring. The reference implementation is [TheDatumOrg/VUS](https://github.com/TheDatumOrg/VUS).
+
+It is consumed as an optional dependency and is not vendored. The license verdict, checked against the upstream repository on 2026-10-26: `setup.py` declares `license="Apache-2.0 license"` with the OSI Apache classifier, and the published PyPI package `vus` 0.0.6 carries the same metadata, but the repository ships no LICENSE and no NOTICE file at any path -- the recursive tree of the default branch has no match for either, GitHub's license endpoint returns 404, and the repository's `license` field is null. Apache-2.0 nominally permits redistribution with attribution, but sections 4(a) and 4(d) require a redistributor to include a copy of the license and any NOTICE file, and upstream publishes neither. Vendoring the scoring path would mean supplying license text upstream never committed, off a metadata-only declaration, so scry imports the backend instead of carrying it.
+
+The consequence for an operator is that `vus_pr` degrades rather than fails. `scry.eval.vus` imports the backend where it is used, never at module scope, so the eval package imports on a host that has never heard of it, and the scoring entry point answers with a null value and a stated reason instead of raising. A report from a host without the backend is a complete report with one field explaining itself.
+
 ## Known divergences
 
 A rubric carries a `known_divergences` list, and it is part of the deliverable rather than an apology. Anywhere the harness and the deployed service differ, or anywhere a measurement convention could be misread, is written down next to the criteria rather than discovered later.
