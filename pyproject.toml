@@ -47,6 +47,7 @@ otel = [
     "opentelemetry-instrumentation-logging>=0.41b0",
 ]
 mcp = []  # reserved for the phase-2 MCP server
+vus = []  # reserved: the VUS-PR backend is overlaid, not locked (docs/evaluation.md)
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
@@ -72,8 +73,14 @@ packages = ["src/scry"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
-    "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
+    "integration: marks tests as integration tests (deselect with '-m \"not integration and not vus_backend\"')",
+    "vus_backend: needs the optional 'vus' backend, which is not in uv.lock; deselected by default, run with 'uv run --all-extras --with vus python -m pytest -m vus_backend'",
 ]
+# The vus_backend tests are deselected rather than skipped: the backend is overlaid
+# by the operator (docs/evaluation.md) and is absent from every sandbox and CI job.
+# A -m on the command line replaces this one, which is how those tests are selected
+# (through python -m pytest: the overlay is not visible to the venv's pytest script).
+addopts = "-m 'not vus_backend'"
 
 [tool.ruff]
 line-length = 100
