@@ -21,9 +21,10 @@ median-spacing grids, the control-inside-incident slice at own and incident
 thresholds, the multi-incident-plus-controls NotImplementedError, the
 healthy-reference sweep-semantics rates and duration-weighted fleet
 aggregation (including the master-2 wall-to-wall shape and the zero-span
-None rules), the negative_control-only case kind, the vus_pr placeholder
+None rules), the negative_control-only case kind, the vus_pr degradation
 and both-accountings sweep across all three kinds, and the eager package
-exports.
+exports. The backend is forced absent wherever vus_pr is asserted on; what
+the wiring computes with one present is tests/test_eval_vus.py's.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from scry.eval.detection import DetectionResult
 from scry.eval.labels import LabelCase, LabelSet
 from scry.eval.metrics import CaseMetrics, GridMetrics, ResourceMetrics, compute_case_metrics
 from scry.eval.scoring import ScoringGrid
+from scry.eval.vus import REASON_BACKEND_UNAVAILABLE
 
 
 def _incident_detection() -> DetectionResult:
@@ -149,7 +151,7 @@ def _grid_metrics(label: str = "serving", **overrides) -> GridMetrics:
         fleet_raises_per_week={},
         fleet_runs_per_week={},
         n_eval_windows=250,
-        vus_pr={"value": None, "reason": "not implemented"},
+        vus_pr={"value": 0.91, "reason": None},
     )
     kwargs.update(overrides)
     return GridMetrics(**kwargs)
@@ -443,7 +445,10 @@ class TestComputeIncidentCaseMetrics:
             for resource in grid.per_resource.values():
                 assert grid.pooled_lead_in_fpr[sustain] != resource.lead_in_fpr[sustain]
 
-    def test_incident_case_grid_assembly(self) -> None:
+    def test_incident_case_grid_assembly(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Backend forced absent: the field then reads the same on a host that
+        # happens to have the optional backend overlaid.
+        monkeypatch.setitem(sys.modules, "vus", None)
         scores, labels = _phase4_miniature()
         case = _compute(scores, labels, {"node-a": (1.0, "override")})
 
@@ -456,7 +461,7 @@ class TestComputeIncidentCaseMetrics:
         assert grid.fleet_time_in_alarm_fraction == {}
         assert grid.fleet_raises_per_week == {}
         assert grid.fleet_runs_per_week == {}
-        assert grid.vus_pr == {"value": None, "reason": "not implemented"}
+        assert grid.vus_pr == {"value": None, "reason": REASON_BACKEND_UNAVAILABLE}
 
     def test_median_spacing_grid_alarm_duration(self) -> None:
         # A cadence-less grid measures its effective step as the median
@@ -696,7 +701,12 @@ class TestHealthyAndControlCases:
         assert grid.per_resource["node-b"].role == "excluded"
         assert set(grid.fleet_runs_per_week) == {3, 1}
 
-    def test_vus_pr_placeholder_and_both_accountings_on_every_kind(self) -> None:
+    def test_vus_pr_degrades_and_both_accountings_on_every_kind(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Every case kind fills vus_pr through the same wiring: with no
+        # backend all three carry its reason, asserted by equality.
+        monkeypatch.setitem(sys.modules, "vus", None)
         incident_scores, incident_labels_set = _phase4_miniature()
         control_case = LabelCase(
             resource_id="node-a",
@@ -727,7 +737,7 @@ class TestHealthyAndControlCases:
         ]
         for case in produced:
             for grid in case.grids.values():
-                assert grid.vus_pr == {"value": None, "reason": "not implemented"}
+                assert grid.vus_pr == {"value": None, "reason": REASON_BACKEND_UNAVAILABLE}
                 for sustain_dict in (
                     grid.pooled_lead_in_fpr,
                     grid.fleet_time_in_alarm_fraction,
