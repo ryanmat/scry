@@ -14,9 +14,12 @@ torch and without reaching for the backend; the three states of the backend
 (absent, installed but its scoring module unimportable, present) each answer
 with their own object; what ``score_vus_pr`` asks the backend for and which key
 it reads back; and a real suite run on a host with no backend produces a report
-whose every grid carries a null-with-reason vus_pr. The metrics wiring that
-replaces that field's placeholder reason lands in a later step -- the suite
-test pins the shape, not the wording.
+whose every grid carries the backend-unavailable reason under vus_pr.
+
+The metrics wiring has its own class: the series ``compute_case_metrics`` asks
+the backend to score and the windows it calls anomalous, the field degrading
+with no backend, a failure INSIDE the scoring call becoming the reason rather
+than ending the run, and no gate reading the field (spec 8.1).
 
 The metric's own arithmetic cannot be checked against a stub, so it is pinned
 in ``TestVusPrAgainstTheBackend``, which carries the ``vus_backend`` marker and
@@ -31,6 +34,8 @@ default suite with no backend present.
 from __future__ import annotations
 
 import importlib
+import json
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -38,11 +43,17 @@ from types import ModuleType
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import pytest
 from synth import write_run_suite_tree
 
 import scry.eval
 from scry.eval import vus
+from scry.eval.candidate import ScoreSet
+from scry.eval.labels import LabelCase, LabelSet
+from scry.eval.metrics import CaseMetrics, compute_case_metrics
+from scry.eval.rubric import GATE_NAMES, evaluate_rubric
+from scry.eval.scoring import ScoringGrid
 from scry.eval.suite import load_suite, run_suite
 
 # A four-window series and its ground truth, fixed on 2026-10-27 as the
@@ -59,6 +70,16 @@ _VUS_PR_PIN = 0.9080401067190556
 # What the recording stub answers with: not the metric, just a number no other
 # constant here could be mistaken for.
 _STUB_VUS_PR = 0.4242
+
+# A declared negative control of the incident's capture: two quiet windows,
+# reported like any labelled resource. node-x is the same capture's UNLABELLED
+# resource -- role "excluded", absent from per_resource -- and its windows
+# would outrank every other if they leaked into the scored series.
+_CONTROL_SCORES = (0.05, 0.07)
+_UNLABELLED_SCORES = (9.0, 9.5)
+
+_TEN_MIN_GRID = ScoringGrid(label="serving", step_samples=1, cadence=pd.Timedelta(minutes=10))
+_WINDOW_ENDS = pd.date_range("2026-01-01T10:00:00Z", periods=4, freq="10min")
 
 
 def _import_vus(monkeypatch: pytest.MonkeyPatch, backend: ModuleType | None) -> ModuleType:
@@ -95,13 +116,79 @@ def _install_backend(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
         calls.append({"score": score, "labels": labels, **kwargs})
         return {"VUS_PR": np.float64(_STUB_VUS_PR), "VUS_ROC": 0.1111, "AUC_PR": 0.2222}
 
+    _put_backend(monkeypatch, get_metrics)
+    return calls
+
+
+def _put_backend(monkeypatch: pytest.MonkeyPatch, get_metrics: Any) -> None:
+    """Force a two-module backend answering ``get_metrics`` into sys.modules."""
     backend = ModuleType("vus")
     metrics = ModuleType("vus.metrics")
     metrics.get_metrics = get_metrics
     backend.metrics = metrics
     monkeypatch.setitem(sys.modules, "vus", backend)
     monkeypatch.setitem(sys.modules, "vus.metrics", metrics)
-    return calls
+
+
+def _case_metrics(incident: bool = True) -> CaseMetrics:
+    """One case over the module fixture, with two more resources.
+
+    node-a carries ``_SCORES`` on a ten-minute grid and, with ``incident``,
+    an incident whose span (primary onset T1 at 10:10, end 10:20) is exactly
+    the two windows ``_LABELS`` marks anomalous; T0 at 10:00 is the anchor
+    onset and not the span's start, so the span follows the primary. Its rows
+    reach the ScoreSet OUT of end order, so the scored order is the wiring's
+    doing, not the input's. node-ctl and node-x carry two windows each over
+    the first two ends. Without ``incident`` the control is the only labelled
+    resource, the case is a control-only one, and every resource of the
+    capture is reported (a control case has no excluded role), so each needs
+    a threshold.
+    """
+    scrambled = [2, 0, 3, 1]
+    errors = [_SCORES[i] for i in scrambled] + [*_CONTROL_SCORES, *_UNLABELLED_SCORES]
+    scores = ScoreSet(
+        errors=np.asarray(errors, dtype=float),
+        end_times=_WINDOW_ENDS[scrambled].append(_WINDOW_ENDS[:2]).append(_WINDOW_ENDS[:2]),
+        resource_ids=np.asarray(["node-a"] * 4 + ["node-ctl"] * 2 + ["node-x"] * 2),
+        grid=_TEN_MIN_GRID,
+        meta={},
+    )
+    labels = LabelSet(
+        version=2,
+        capture=None,
+        cases=[
+            LabelCase(
+                resource_id="node-a",
+                role="incident",
+                type="cpu",
+                onsets={"T0": _WINDOW_ENDS[0], "T1": _WINDOW_ENDS[1]},
+                primary_onset="T1",
+                end=_WINDOW_ENDS[2],
+                notes=None,
+            ),
+            LabelCase(
+                resource_id="node-ctl",
+                role="negative_control",
+                type=None,
+                onsets={},
+                primary_onset=None,
+                end=None,
+                notes=None,
+            ),
+        ][0 if incident else 1 :],
+    )
+    reported = ("node-a", "node-ctl") if incident else ("node-a", "node-ctl", "node-x")
+    return compute_case_metrics(
+        "vus_wiring",
+        {"serving": scores},
+        labels,
+        {rid: (0.5, "per_resource") for rid in reported},
+        mode="no_bridging",
+        onset_anchor="T0",
+        sustain=3,
+        lead_in=pd.Timedelta(hours=1),
+        max_leadtime=pd.Timedelta(hours=2),
+    )
 
 
 class TestImportContract:
@@ -239,6 +326,145 @@ class TestTheScoringPath:
         assert type(result["value"]) is float
 
 
+def _raise_value_error(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    raise ValueError("upstream refused the window geometry")
+
+
+def _every_gate_rubric() -> dict[str, Any]:
+    """Every gate of the vocabulary, required, each evaluable on the fixture."""
+    params = {
+        "lead_in_fpr": {"max_fraction": 1.0, "min_eval_windows": 0},
+        "alarm_fatigue": {
+            "max_time_in_alarm_fraction_per_resource": 1.0,
+            "max_fleet_raises_per_week": 1000.0,
+        },
+    }
+    return {
+        "version": 1,
+        "headline_grid": "serving",
+        "gates": {
+            name: {"required": True, "allow_absent": True, **params.get(name, {})}
+            for name in GATE_NAMES
+        },
+        "reported": {"vus_pr": {}},
+    }
+
+
+class TestTheMetricsWiring:
+    def test_the_grid_carries_the_score_over_its_resources_in_id_and_time_order(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One call per grid, over the reported windows, labelled by the span.
+
+        The stub answers a canned number, so what this pins is the series the
+        wiring builds: the resources the grid reports on in sorted id order
+        (unlabelled node-x is not one), each one's windows in end-time order
+        (the ScoreSet hands them scrambled), and ground truth 1 exactly inside
+        the incident's [primary onset, end] span -- the control is negatives.
+        """
+        calls = _install_backend(monkeypatch)
+
+        grid = _case_metrics().grids["serving"]
+
+        assert grid.vus_pr == {"value": _STUB_VUS_PR, "reason": None}
+        assert len(calls) == 1
+        assert calls[0]["score"].tolist() == [*_SCORES, *_CONTROL_SCORES]
+        assert calls[0]["labels"].tolist() == [*_LABELS, 0, 0]
+
+    def test_the_grid_degrades_with_the_backend_absent_and_the_placeholder_is_gone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No backend: the field carries the backend's reason, not "not implemented"."""
+        monkeypatch.setitem(sys.modules, "vus", None)
+
+        grid = _case_metrics().grids["serving"]
+
+        assert grid.vus_pr == {"value": None, "reason": vus.REASON_BACKEND_UNAVAILABLE}
+        assert "not implemented" not in grid.vus_pr["reason"]
+
+    @pytest.mark.parametrize(
+        ("answer", "raised"),
+        [
+            (_raise_value_error, "ValueError: upstream refused the window geometry"),
+            (lambda *a, **k: {"VUS_ROC": 0.5}, "KeyError: 'VUS_PR'"),
+        ],
+        ids=["the backend raises", "the backend answers without VUS_PR"],
+    )
+    def test_a_failure_inside_the_scoring_call_becomes_the_reason(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        answer: Any,
+        raised: str,
+    ) -> None:
+        """A backend that is present and broken degrades the field, not the run.
+
+        ``score_vus_pr`` catches ImportError and nothing else, so a backend
+        that raises on the input it was handed, or answers without the key
+        scry reads, arrives here. Reported and never gating (spec 8.1): the
+        exception becomes the reason, its traceback goes to the log, and the
+        rest of the bundle is computed.
+        """
+        _put_backend(monkeypatch, answer)
+
+        with caplog.at_level(logging.WARNING, logger="scry.eval.metrics"):
+            grid = _case_metrics().grids["serving"]
+
+        assert grid.vus_pr == {"value": None, "reason": f"{vus.REASON_SCORING_FAILED}{raised}"}
+        assert grid.n_eval_windows == 6
+        assert set(grid.per_resource) == {"node-a", "node-ctl"}
+        records = [r for r in caplog.records if r.name == "scry.eval.metrics"]
+        assert len(records) == 1
+        assert records[0].levelno == logging.WARNING
+        assert records[0].exc_info is not None
+        assert raised.split(":")[0] == records[0].exc_info[0].__name__
+
+    def test_a_series_with_no_positive_window_is_undefined_and_never_reaches_the_backend(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A control-only case has no positive, so the metric is undefined.
+
+        Upstream raises on an all-negative label array, so the wiring answers
+        with the undefined reason before the call: the backend records no
+        call, and the reason is not a scoring failure.
+        """
+        calls = _install_backend(monkeypatch)
+
+        grid = _case_metrics(incident=False).grids["serving"]
+
+        assert grid.vus_pr == {"value": None, "reason": vus.REASON_NO_POSITIVE_WINDOWS}
+        assert calls == []
+        assert set(grid.per_resource) == {"node-a", "node-ctl", "node-x"}
+
+
+class TestTheRubricReportsAndNeverGates:
+    def test_no_gate_reads_the_field(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Every gate returns the same verdict whether or not vus_pr has a value.
+
+        Spec 8.1 makes VUS-PR reported: it belongs to the rubric's ``reported``
+        block and no gate may consult it, so two bundles differing in nothing
+        but that field must be indistinguishable to every gate.
+        """
+        with pytest.MonkeyPatch.context() as present:
+            _install_backend(present)
+            scored = _case_metrics()
+        monkeypatch.setitem(sys.modules, "vus", None)
+        degraded = _case_metrics()
+        assert scored.grids["serving"].vus_pr != degraded.grids["serving"].vus_pr
+
+        rubric = _every_gate_rubric()
+        scored_result = evaluate_rubric(rubric, scored)
+        degraded_result = evaluate_rubric(rubric, degraded)
+
+        assert [gate.name for gate in scored_result.gates] == list(GATE_NAMES)
+        assert scored_result.gates == degraded_result.gates
+        assert scored_result.passed == degraded_result.passed
+        evaluated = repr(scored_result.gates)
+        assert "vus_pr" not in evaluated
+        assert str(_STUB_VUS_PR) not in evaluated
+        assert "vus_pr" in scored_result.reported
+
+
 @pytest.mark.vus_backend
 class TestVusPrAgainstTheBackend:
     """The metric itself, against the real backend. DESELECTED by default.
@@ -288,11 +514,10 @@ class TestSuiteRunWithoutTheBackend:
         """A host without the backend still gets a report.
 
         vus_pr is reported, never gating, so its absence degrades to a stated
-        reason rather than failing the run. The reason's wording belongs to
-        whichever step owns the field -- the placeholder's today, the
-        backend-unavailable one once the metrics wiring lands -- so this pins
-        the null-with-reason shape on every grid of every case and the run
-        completing, not the text.
+        reason rather than failing the run. The metrics wiring owns the field,
+        so the reason on every grid of both cases -- the incident and the
+        healthy reference -- is the backend's own, and no grid of the report
+        carries "not implemented".
         """
         monkeypatch.setitem(sys.modules, "vus", None)
 
@@ -302,6 +527,5 @@ class TestSuiteRunWithoutTheBackend:
         for case in report["cases"]:
             assert case["grids"]
             for grid in case["grids"].values():
-                assert grid["vus_pr"]["value"] is None
-                assert isinstance(grid["vus_pr"]["reason"], str)
-                assert grid["vus_pr"]["reason"]
+                assert grid["vus_pr"] == {"value": None, "reason": vus.REASON_BACKEND_UNAVAILABLE}
+        assert "not implemented" not in json.dumps(report)

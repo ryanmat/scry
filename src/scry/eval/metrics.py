@@ -8,8 +8,10 @@ role: the incident group (detection and per-onset leads, lead-in FPR,
 incident coverage), the healthy-reference group (duration-weighted
 alarm-fatigue rates), and the negative-control group (slice stats at the
 control's own and each incident resource's threshold). ``GridMetrics`` adds
-the pooled and fleet aggregates for one grid; ``CaseMetrics`` keys
-GridMetrics by grid label and carries the ``context`` conduit the
+the pooled and fleet aggregates for one grid plus ``vus_pr``, the reported,
+never-gating VUS-PR field (section 8.1) that ``scry.eval.vus`` scores and
+that degrades to null with a stated reason whenever it cannot be computed.
+``CaseMetrics`` keys GridMetrics by label and carries the ``context`` conduit the
 coverage_integrity and sanity gates read by documented key (unknown keys are
 ignored, so producers may add keys without breaking an older rubric).
 
@@ -38,6 +40,7 @@ without torch.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -53,10 +56,13 @@ from scry.eval.detection import (
     slice_stats,
 )
 from scry.eval.labels import ROLES, LabelCase, LabelSet
+from scry.eval.vus import REASON_SCORING_FAILED, score_vus_pr
 
 if TYPE_CHECKING:
     from scry.eval.candidate import ScoreSet
     from scry.eval.scoring import ScoringGrid
+
+logger = logging.getLogger(__name__)
 
 CASE_KINDS: tuple[str, ...] = ("incident", "healthy_reference", "negative_control")
 
@@ -220,9 +226,47 @@ def _covered_windows(flags: np.ndarray, sustain: int) -> int:
     return sum(end - start + 1 for start, end in anomaly_runs(flags, sustain))
 
 
-def _vus_pr_placeholder() -> dict[str, Any]:
-    """The vus_pr field until scry/eval/vus.py lands: null value, stated reason."""
-    return {"value": None, "reason": "not implemented"}
+def _vus_pr(
+    scores: ScoreSet, labels: LabelSet, per_resource: Mapping[str, ResourceMetrics]
+) -> dict[str, Any]:
+    """One grid's vus_pr field: the metric, or null with the reason there is none.
+
+    The scored series is the windows the grid reports on -- the resources of
+    ``per_resource``, so an incident capture's unlabelled (role ``excluded``)
+    resources stay out of this number as they stay out of every other -- in
+    sorted id order, each resource's windows in end-time order. Ground truth
+    is 1 inside a labelled incident's ``[primary onset, end]`` span (what
+    ``_incident_coverage`` measures coverage over) and 0 elsewhere: a declared
+    control is the negatives a precision number is made of. A series with no
+    positive window (a case with no incident labels, or an incident whose span
+    holds no window end) has no precision-recall surface, and ``score_vus_pr``
+    answers it with ``REASON_NO_POSITIVE_WINDOWS`` without calling the backend.
+    The resources are concatenated into one series, so upstream's tolerance
+    extension (``w // 2`` windows per side) can credit a neighbouring
+    resource's windows when a positive touches a resource boundary.
+
+    VUS-PR is reported and never gating (spec section 8.1), so ANY failure out
+    of the scoring call becomes this field's reason and the run goes on;
+    ``score_vus_pr`` degrades on a missing backend and lets everything else
+    through, so the catch is here, where a suite run reaches it.
+    """
+    ids = np.asarray(scores.resource_ids).astype(str)
+    reported = np.isin(ids, list(per_resource))
+    # Resource first, end time second: np.lexsort's last key is the primary one.
+    order = np.lexsort((scores.end_times[reported].values, ids[reported]))
+    ids, ends = ids[reported][order], scores.end_times[reported][order]
+    truth = np.zeros(ids.size, dtype=int)
+    for case in labels.incidents():
+        onset = case.onsets[case.primary_onset]
+        truth[(ids == case.resource_id) & (ends >= onset) & (ends <= case.end)] = 1
+    series = np.asarray(scores.errors)[reported][order]
+    try:
+        return score_vus_pr(series, truth)
+    except Exception as exc:
+        # Broad by intent: a reported metric may not end a suite run, and the
+        # backend is third-party code whose failure modes are not enumerable.
+        logger.warning("vus_pr scoring call raised; reported as the field's reason", exc_info=True)
+        return {"value": None, "reason": f"{REASON_SCORING_FAILED}{type(exc).__name__}: {exc}"}
 
 
 def _resolved_threshold(thresholds: Mapping[str, tuple[float, str]], rid: str) -> tuple[float, str]:
@@ -512,7 +556,7 @@ def _incident_grid_metrics(
         fleet_raises_per_week={},
         fleet_runs_per_week={},
         n_eval_windows=sum(metrics.n_eval_windows for metrics in per_resource.values()),
-        vus_pr=_vus_pr_placeholder(),
+        vus_pr=_vus_pr(scores, labels, per_resource),
     )
 
 
@@ -623,7 +667,7 @@ def _healthy_grid_metrics(
         fleet_raises_per_week=dict(fleet_rates),
         fleet_runs_per_week=dict(fleet_rates),
         n_eval_windows=sum(metrics.n_eval_windows for metrics in per_resource.values()),
-        vus_pr=_vus_pr_placeholder(),
+        vus_pr=_vus_pr(scores, labels, per_resource),
     )
 
 

@@ -1,5 +1,5 @@
 # Description: VUS-PR entry point over TheDatumOrg/VUS, consumed as an optional dependency.
-# Description: Torch-free; degrades to a null value with a stated reason, never raising.
+# Description: Torch-free; a missing or unimportable backend degrades to null with a reason.
 
 """VUS-PR: volume under the precision-recall surface (spec section 12).
 
@@ -38,6 +38,24 @@ REASON_BACKEND_UNIMPORTABLE = (
     "VUS-PR unavailable: the optional 'vus' backend is installed but importing "
     "vus.metrics failed: "
 )
+REASON_SCORING_FAILED = "VUS-PR unavailable: the scoring call raised "
+"""The reason for a backend that is present and fails anyway, with the error.
+
+Produced by ``scry.eval.metrics``, not here: ``score_vus_pr`` lets everything
+but a failed import through, and the wiring catches it where the field is
+filled, because that is where "reported, never gating" (section 8.1) is
+enforced. The wording is here with its siblings so one module owns the
+vocabulary.
+"""
+REASON_NO_POSITIVE_WINDOWS = "VUS-PR undefined: the scored series has no positive window"
+"""The reason for a series the metric is not defined on.
+
+A precision-recall surface needs at least one positive; upstream raises on an
+all-negative label array rather than answering. ``score_vus_pr`` answers this
+after the import probe and before the backend is called, so with the backend
+present a case with no incident labels reads as undefined rather than as a
+failed call, and with it absent the backend's own reason wins.
+"""
 
 MAX_TOLERANCE_WINDOWS = 4
 """The top of the tolerance range VUS-PR is averaged over: w = 0, 1, ... 4.
@@ -80,6 +98,13 @@ def _load_backend() -> tuple[ModuleType | None, str | None]:
 def score_vus_pr(scores: Sequence[float], labels: Sequence[int]) -> dict[str, Any]:
     """VUS-PR over one window series, as a value-and-reason object.
 
+    The backend returns several metrics in one dict; ``metric="vus"`` asks for
+    the VUS family, ``VUS_PR`` is the entry read back, and ``slidingWindow`` is
+    upstream's name for the top of the tolerance range. The backend does array
+    arithmetic on its inputs (``-np.sort(-score)``), so the sequences reach it
+    as numpy arrays, and the numpy scalar it answers with comes back a plain
+    float so the report serializes.
+
     Args:
         scores: per-window anomaly scores, ordered by window end.
         labels: per-window binary ground truth, aligned with ``scores``.
@@ -89,21 +114,24 @@ def score_vus_pr(scores: Sequence[float], labels: Sequence[int]) -> dict[str, An
         ``{"value": None, "reason": str}`` naming what stopped it when it was
         not. A backend that is missing, or installed but unimportable, is one
         of those reasons and not an exception: the field degrades, the run
-        continues.
+        continues. A series with no positive label is another: the metric is
+        undefined on it and the backend is not called.
 
-    The backend returns several metrics in one dict; ``metric="vus"`` asks for
-    the VUS family, ``VUS_PR`` is the entry read back, and ``slidingWindow`` is
-    upstream's name for the top of the tolerance range. The backend does array
-    arithmetic on its inputs (``-np.sort(-score)``), so the sequences reach it
-    as numpy arrays, and the numpy scalar it answers with comes back a plain
-    float so the report serializes.
+    Raises:
+        Exception: the backend's own scoring errors (a malformed input, say)
+            pass through; only the import and the positive-free series
+            degrade here. ``scry.eval.metrics`` catches them under
+            ``REASON_SCORING_FAILED`` where the field is filled.
     """
     metrics, reason = _load_backend()
     if metrics is None:
         return {"value": None, "reason": reason}
+    truth = np.asarray(labels, dtype=int)
+    if not truth.any():
+        return {"value": None, "reason": REASON_NO_POSITIVE_WINDOWS}
     scored = metrics.get_metrics(
         np.asarray(scores, dtype=float),
-        np.asarray(labels, dtype=int),
+        truth,
         metric="vus",
         slidingWindow=MAX_TOLERANCE_WINDOWS,
     )
